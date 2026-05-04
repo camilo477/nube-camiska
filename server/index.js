@@ -31,8 +31,11 @@ const mimeTypes = {
   ".avif": "image/avif",
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
+  ".jfif": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
   ".js": "text/javascript; charset=utf-8",
@@ -43,6 +46,8 @@ const mimeTypes = {
   ".ogg": "audio/ogg",
   ".pdf": "application/pdf",
   ".png": "image/png",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
   ".webm": "video/webm",
@@ -778,7 +783,7 @@ function sortItems(items, key, direction) {
 
 function getMediaType(name) {
   const extension = path.extname(name).toLowerCase().slice(1);
-  if (["avif", "gif", "heic", "jpeg", "jpg", "png", "webp"].includes(extension)) return "image";
+  if (["avif", "bmp", "gif", "heic", "heif", "ico", "jfif", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp"].includes(extension)) return "image";
   if (["m4v", "mov", "mp4", "mpeg", "webm"].includes(extension)) return "video";
   if (["aac", "flac", "m4a", "mp3", "ogg", "wav"].includes(extension)) return "audio";
   if (["doc", "docx", "md", "pdf", "txt", "xls", "xlsx"].includes(extension)) return "document";
@@ -815,8 +820,19 @@ async function detectContentType(absolutePath) {
     if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
     if (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a") return "image/gif";
     if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+    if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+    if (bytes.subarray(0, 4).equals(Buffer.from([0x00, 0x00, 0x01, 0x00]))) return "image/x-icon";
+    if (
+      bytes.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00])) ||
+      bytes.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a]))
+    ) return "image/tiff";
     if (bytes.subarray(0, 4).toString("ascii") === "%PDF") return "application/pdf";
-    if (bytes.subarray(4, 8).toString("ascii") === "ftyp") return "video/mp4";
+    if (bytes.subarray(4, 8).toString("ascii") === "ftyp") {
+      const brand = bytes.subarray(8, 16).toString("ascii");
+      if (brand.includes("heic") || brand.includes("heix") || brand.includes("hevc") || brand.includes("heif") || brand.includes("mif1")) return "image/heic";
+      if (brand.includes("avif")) return "image/avif";
+      return "video/mp4";
+    }
     if (bytes.subarray(0, 4).toString("ascii") === "OggS") return "audio/ogg";
     if (bytes.subarray(0, 3).toString("ascii") === "ID3") return "audio/mpeg";
     if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";

@@ -306,10 +306,10 @@ function previewModal() {
 
 function largePreviewFor(item: CloudItem) {
   if (!item.url) return "";
-  if (item.mediaType === "image") return `<img src="${item.url}" alt="${escapeAttribute(item.name)}" />`;
-  if (item.mediaType === "video") return `<video src="${item.url}" controls autoplay preload="metadata"></video>`;
-  if (item.mediaType === "audio") return `<audio src="${item.url}" controls autoplay preload="metadata"></audio>`;
-  if (item.mediaType === "document" && item.name.toLowerCase().endsWith(".pdf")) return `<iframe src="${item.url}" title="${escapeAttribute(item.name)}"></iframe>`;
+  if (item.mediaType === "image") return `<img class="viewer-image" src="${item.url}" alt="${escapeAttribute(item.name)}" />`;
+  if (item.mediaType === "video") return `<video class="viewer-video" src="${item.url}" controls autoplay preload="metadata"></video>`;
+  if (item.mediaType === "audio") return `<audio class="viewer-audio" src="${item.url}" controls autoplay preload="metadata"></audio>`;
+  if (item.mediaType === "document" && item.name.toLowerCase().endsWith(".pdf")) return `<iframe class="viewer-document" src="${item.url}" title="${escapeAttribute(item.name)}"></iframe>`;
   return `<div class="empty-state">${icon(iconForItem(item), 44)}<strong>Sin vista previa</strong></div>`;
 }
 
