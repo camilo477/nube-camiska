@@ -1,11 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import Busboy from "busboy";
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -414,10 +417,11 @@ async function emptyTrash(response, auth) {
 }
 
 async function sendDashboard(response) {
+  const disk = await getDiskUsage(storageDir);
   const stats = {
     usedBytes: 0,
-    freeBytes: os.freemem(),
-    totalBytes: os.totalmem(),
+    freeBytes: disk.freeBytes,
+    totalBytes: disk.totalBytes,
     count: 0,
     byType: { images: 0, videos: 0, audio: 0, documents: 0, other: 0 },
     monthlyGrowth: {}
@@ -434,6 +438,30 @@ async function sendDashboard(response) {
   });
 
   sendJson(response, 200, stats);
+}
+
+async function getDiskUsage(targetPath) {
+  try {
+    const { stdout } = await execFileAsync("df", ["-Pk", targetPath]);
+    const lines = stdout.trim().split("\n");
+    const columns = lines.at(-1)?.trim().split(/\s+/) ?? [];
+    const totalKb = Number(columns[1]);
+    const freeKb = Number(columns[3]);
+
+    if (Number.isFinite(totalKb) && Number.isFinite(freeKb)) {
+      return {
+        totalBytes: totalKb * 1024,
+        freeBytes: freeKb * 1024
+      };
+    }
+  } catch (error) {
+    console.error("No se pudo leer uso de disco", error);
+  }
+
+  return {
+    totalBytes: 0,
+    freeBytes: 0
+  };
 }
 
 async function sendStoredFile(requestUrl, response) {
