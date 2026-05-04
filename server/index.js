@@ -144,7 +144,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (requestUrl.pathname.startsWith("/files/") && request.method === "GET") {
-      await sendStoredFile(requestUrl, response);
+      await sendStoredFile(request, requestUrl, response);
       return;
     }
 
@@ -464,9 +464,9 @@ async function getDiskUsage(targetPath) {
   };
 }
 
-async function sendStoredFile(requestUrl, response) {
+async function sendStoredFile(request, requestUrl, response) {
   const relativePath = decodeURIComponent(requestUrl.pathname.replace(/^\/files\//, ""));
-  await streamStoredFile(normalizeRelativePath(relativePath), response);
+  await streamStoredFile(normalizeRelativePath(relativePath), request, response);
 }
 
 async function sendSharedFile(requestUrl, response) {
@@ -483,10 +483,10 @@ async function sendSharedFile(requestUrl, response) {
     return;
   }
 
-  await streamStoredFile(share.path, response);
+  await streamStoredFile(share.path, null, response);
 }
 
-async function streamStoredFile(relativePath, response) {
+async function streamStoredFile(relativePath, request, response) {
   const absolutePath = toStoragePath(relativePath);
   const stat = await fs.stat(absolutePath);
 
@@ -495,10 +495,40 @@ async function streamStoredFile(relativePath, response) {
     return;
   }
 
-  response.writeHead(200, {
-    "Content-Type": mimeTypes[path.extname(absolutePath).toLowerCase()] ?? "application/octet-stream",
-    "Content-Length": stat.size,
+  const contentType = mimeTypes[path.extname(absolutePath).toLowerCase()] ?? "application/octet-stream";
+  const range = request?.headers.range;
+  const commonHeaders = {
+    "Accept-Ranges": "bytes",
+    "Content-Type": contentType,
     "Content-Disposition": `inline; filename="${encodeHeaderFilename(path.basename(absolutePath))}"`
+  };
+
+  if (range) {
+    const match = range.match(/bytes=(\d*)-(\d*)/);
+    const start = match?.[1] ? Number(match[1]) : 0;
+    const end = match?.[2] ? Number(match[2]) : stat.size - 1;
+
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || end >= stat.size) {
+      response.writeHead(416, {
+        ...commonHeaders,
+        "Content-Range": `bytes */${stat.size}`
+      });
+      response.end();
+      return;
+    }
+
+    response.writeHead(206, {
+      ...commonHeaders,
+      "Content-Length": end - start + 1,
+      "Content-Range": `bytes ${start}-${end}/${stat.size}`
+    });
+    createReadStream(absolutePath, { start, end }).pipe(response);
+    return;
+  }
+
+  response.writeHead(200, {
+    ...commonHeaders,
+    "Content-Length": stat.size
   });
   createReadStream(absolutePath).pipe(response);
 }

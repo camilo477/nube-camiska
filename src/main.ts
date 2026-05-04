@@ -85,6 +85,7 @@ let sortDirection: SortDirection = "asc";
 let viewMode: ViewMode = "list";
 let dashboard: Dashboard | null = null;
 let isDragging = false;
+let previewPath: string | null = null;
 
 const appRoot = document.querySelector<HTMLDivElement>("#root");
 if (!appRoot) throw new Error("Root element not found");
@@ -170,6 +171,7 @@ function render(errorMessage = "") {
           </div>
         </div>
       </section>
+      ${previewPath ? previewModal() : ""}
     </main>
   `;
 
@@ -227,9 +229,10 @@ function trashPanel() {
 }
 
 function fileRow(item: CloudItem) {
+  const canPreview = item.type === "file" && isPreviewable(item);
   return `
     <article class="file-row">
-      <button class="file-main ${item.type === "folder" ? "open-folder" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
+      <button class="file-main ${item.type === "folder" ? "open-folder" : canPreview ? "open-preview" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
         <span class="file-icon">${icon(iconForItem(item), 22)}</span>
         <span>
           <strong>${escapeHtml(item.name)}</strong>
@@ -247,7 +250,7 @@ function fileRow(item: CloudItem) {
 function galleryCard(item: CloudItem) {
   return `
     <article class="gallery-card">
-      <button class="preview ${item.type === "folder" ? "open-folder" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
+      <button class="preview ${item.type === "folder" ? "open-folder" : isPreviewable(item) ? "open-preview" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
         ${previewFor(item)}
       </button>
       <div class="gallery-meta">
@@ -260,6 +263,47 @@ function galleryCard(item: CloudItem) {
       </div>
     </article>
   `;
+}
+
+function previewModal() {
+  const item = items.find((candidate) => candidate.path === previewPath);
+  if (!item || !item.url) return "";
+
+  const previewableItems = items.filter(isPreviewable);
+  const index = previewableItems.findIndex((candidate) => candidate.path === item.path);
+  const hasPrevious = index > 0;
+  const hasNext = index >= 0 && index < previewableItems.length - 1;
+
+  return `
+    <section class="viewer-backdrop" role="dialog" aria-modal="true" aria-label="Vista previa">
+      <div class="viewer-shell">
+        <header class="viewer-header">
+          <div>
+            <strong>${escapeHtml(item.name)}</strong>
+            <small>${formatBytes(item.size ?? 0)} · ${formatDate(item.modifiedAt)}</small>
+          </div>
+          <div class="viewer-actions">
+            <a class="file-action" href="${item.url}" target="_blank" rel="noreferrer">${icon("download", 15)} Abrir</a>
+            <button class="icon-button" id="close-preview-button" type="button" aria-label="Cerrar">×</button>
+          </div>
+        </header>
+        <div class="viewer-body">
+          <button class="viewer-nav" id="previous-preview-button" type="button" ${hasPrevious ? "" : "disabled"} aria-label="Anterior">‹</button>
+          <div class="viewer-media">${largePreviewFor(item)}</div>
+          <button class="viewer-nav" id="next-preview-button" type="button" ${hasNext ? "" : "disabled"} aria-label="Siguiente">›</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function largePreviewFor(item: CloudItem) {
+  if (!item.url) return "";
+  if (item.mediaType === "image") return `<img src="${item.url}" alt="${escapeAttribute(item.name)}" />`;
+  if (item.mediaType === "video") return `<video src="${item.url}" controls autoplay preload="metadata"></video>`;
+  if (item.mediaType === "audio") return `<audio src="${item.url}" controls autoplay preload="metadata"></audio>`;
+  if (item.mediaType === "document" && item.name.toLowerCase().endsWith(".pdf")) return `<iframe src="${item.url}" title="${escapeAttribute(item.name)}"></iframe>`;
+  return `<div class="empty-state">${icon(iconForItem(item), 44)}<strong>Sin vista previa</strong></div>`;
 }
 
 function itemActions(item: CloudItem) {
@@ -333,6 +377,25 @@ function bindEvents() {
       void loadFiles();
     });
   });
+  document.querySelectorAll<HTMLButtonElement>(".open-preview").forEach((button) => {
+    button.addEventListener("click", () => {
+      previewPath = button.dataset.path ?? null;
+      render();
+    });
+  });
+  document.querySelector("#close-preview-button")?.addEventListener("click", () => {
+    previewPath = null;
+    render();
+  });
+  document.querySelector(".viewer-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      previewPath = null;
+      render();
+    }
+  });
+  document.querySelector("#previous-preview-button")?.addEventListener("click", () => movePreview(-1));
+  document.querySelector("#next-preview-button")?.addEventListener("click", () => movePreview(1));
+  document.addEventListener("keydown", handlePreviewKeys, { once: true });
   document.querySelectorAll<HTMLButtonElement>(".rename-action").forEach((button) => {
     button.addEventListener("click", () => void renameItem(button.dataset.path ?? "", button.dataset.name ?? ""));
   });
@@ -369,6 +432,25 @@ function bindEvents() {
     dropZone.classList.remove("is-dragging");
     void uploadFiles(Array.from(event.dataTransfer?.files ?? []));
   });
+}
+
+function handlePreviewKeys(event: KeyboardEvent) {
+  if (!previewPath) return;
+  if (event.key === "Escape") {
+    previewPath = null;
+    render();
+  }
+  if (event.key === "ArrowLeft") movePreview(-1);
+  if (event.key === "ArrowRight") movePreview(1);
+}
+
+function movePreview(direction: -1 | 1) {
+  const previewableItems = items.filter(isPreviewable);
+  const index = previewableItems.findIndex((item) => item.path === previewPath);
+  const next = previewableItems[index + direction];
+  if (!next) return;
+  previewPath = next.path;
+  render();
 }
 
 async function refreshAll() {
@@ -517,6 +599,16 @@ function iconForItem(item: CloudItem): IconName {
   if (item.mediaType === "video") return "video";
   if (item.mediaType === "audio") return "music";
   return "file";
+}
+
+function isPreviewable(item: CloudItem) {
+  return (
+    item.type === "file" &&
+    (item.mediaType === "image" ||
+      item.mediaType === "video" ||
+      item.mediaType === "audio" ||
+      (item.mediaType === "document" && item.name.toLowerCase().endsWith(".pdf")))
+  );
 }
 
 function formatBytes(bytes: number) {
