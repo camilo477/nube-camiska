@@ -32,6 +32,27 @@ type Dashboard = {
   monthlyGrowth: Record<string, number>;
 };
 
+type UploadCandidate = {
+  file: File;
+  relativePath: string;
+};
+
+type FileSystemEntryLike = {
+  name: string;
+  isFile: boolean;
+  isDirectory: boolean;
+};
+
+type FileSystemFileEntryLike = FileSystemEntryLike & {
+  file: (success: (file: File) => void, error?: (error: DOMException) => void) => void;
+};
+
+type FileSystemDirectoryEntryLike = FileSystemEntryLike & {
+  createReader: () => {
+    readEntries: (success: (entries: FileSystemEntryLike[]) => void, error?: (error: DOMException) => void) => void;
+  };
+};
+
 type IconName =
   | "arrow-left"
   | "cloud"
@@ -86,6 +107,7 @@ let viewMode: ViewMode = "list";
 let dashboard: Dashboard | null = null;
 let isDragging = false;
 let previewPath: string | null = null;
+let selectedPaths = new Set<string>();
 
 const appRoot = document.querySelector<HTMLDivElement>("#root");
 if (!appRoot) throw new Error("Root element not found");
@@ -165,6 +187,7 @@ function render(errorMessage = "") {
             </button>
           </div>
 
+          ${role === "admin" && selectedPaths.size ? bulkActions() : ""}
           ${errorMessage ? `<p class="error-message">${errorMessage}</p>` : ""}
           <div class="${viewMode === "gallery" ? "gallery-grid" : "files-list"}" id="files-list">
             ${visibleItems.length ? visibleItems.map(viewMode === "gallery" ? galleryCard : fileRow).join("") : emptyState()}
@@ -176,6 +199,17 @@ function render(errorMessage = "") {
   `;
 
   bindEvents();
+}
+
+function bulkActions() {
+  return `
+    <div class="bulk-actions">
+      <strong>${selectedPaths.size} seleccionado${selectedPaths.size === 1 ? "" : "s"}</strong>
+      <button class="secondary-action" id="bulk-move-button" type="button">${icon("move", 15)} Mover</button>
+      <button class="danger-wide" id="bulk-delete-button" type="button">${icon("trash", 15)} Papelera</button>
+      <button class="secondary-action" id="clear-selection-button" type="button">Limpiar</button>
+    </div>
+  `;
 }
 
 function dashboardView(data: Dashboard) {
@@ -239,8 +273,9 @@ function fileRow(item: CloudItem) {
 
   return `
     <article class="file-row">
+      ${selectionControl(item)}
       <button class="file-main ${item.type === "folder" ? "open-folder" : canPreview ? "open-preview" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
-        <span class="file-icon">${icon(iconForItem(item), 22)}</span>
+        ${fileThumb(item)}
         <span>
           <strong>${escapeHtml(item.name)}</strong>
           <small>${item.type === "folder" ? "Carpeta" : formatBytes(item.size ?? 0)} · ${formatDate(item.modifiedAt)}${item.checksum ? ` · sha256 ${item.checksum.slice(0, 10)}` : ""}</small>
@@ -254,9 +289,18 @@ function fileRow(item: CloudItem) {
   `;
 }
 
+function fileThumb(item: CloudItem) {
+  if (item.type === "file" && item.mediaType === "image" && item.url) {
+    return `<span class="file-thumb"><img src="${item.url}" alt="${escapeAttribute(item.name)}" loading="lazy" /></span>`;
+  }
+
+  return `<span class="file-icon">${icon(iconForItem(item), 22)}</span>`;
+}
+
 function galleryCard(item: CloudItem) {
   return `
     <article class="gallery-card">
+      ${selectionControl(item)}
       <button class="preview ${item.type === "folder" ? "open-folder" : isPreviewable(item) ? "open-preview" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
         ${previewFor(item)}
       </button>
@@ -269,6 +313,17 @@ function galleryCard(item: CloudItem) {
         ${itemActions(item)}
       </div>
     </article>
+  `;
+}
+
+function selectionControl(item: CloudItem) {
+  if (role !== "admin") return "";
+
+  return `
+    <label class="select-item" aria-label="Seleccionar ${escapeAttribute(item.name)}">
+      <input class="select-checkbox" type="checkbox" data-path="${escapeAttribute(item.path)}" ${selectedPaths.has(item.path) ? "checked" : ""} />
+      <span></span>
+    </label>
   `;
 }
 
@@ -351,6 +406,12 @@ function bindEvents() {
   });
   document.querySelector("#new-folder-button")?.addEventListener("click", () => void createFolder());
   document.querySelector("#empty-trash-button")?.addEventListener("click", () => void emptyTrash());
+  document.querySelector("#bulk-move-button")?.addEventListener("click", () => void moveSelectedItems());
+  document.querySelector("#bulk-delete-button")?.addEventListener("click", () => void deleteSelectedItems());
+  document.querySelector("#clear-selection-button")?.addEventListener("click", () => {
+    selectedPaths = new Set();
+    render();
+  });
   document.querySelector("#pick-files-button")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#file-input")?.click());
   document.querySelector("#pick-folder-button")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#folder-input")?.click());
   document.querySelector("#view-mode-button")?.addEventListener("click", () => {
@@ -373,8 +434,22 @@ function bindEvents() {
 
   document.querySelectorAll<HTMLInputElement>("#file-input, #folder-input").forEach((input) => {
     input.addEventListener("change", () => {
-      void uploadFiles(Array.from(input.files ?? []));
+      void uploadFiles(filesToUploadCandidates(Array.from(input.files ?? [])));
       input.value = "";
+    });
+  });
+
+  document.querySelectorAll<HTMLInputElement>(".select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const path = checkbox.dataset.path;
+      if (!path) return;
+      selectedPaths = new Set(selectedPaths);
+      if (checkbox.checked) {
+        selectedPaths.add(path);
+      } else {
+        selectedPaths.delete(path);
+      }
+      render();
     });
   });
 
@@ -437,7 +512,7 @@ function bindEvents() {
     event.preventDefault();
     isDragging = false;
     dropZone.classList.remove("is-dragging");
-    void uploadFiles(Array.from(event.dataTransfer?.files ?? []));
+    void uploadDroppedItems(event.dataTransfer);
   });
 }
 
@@ -472,6 +547,7 @@ async function loadFiles() {
     currentPath = data.path;
     parentPath = data.parent;
     items = data.items;
+    selectedPaths = new Set([...selectedPaths].filter((path) => items.some((item) => item.path === path)));
     render();
   } catch (error) {
     render(error instanceof Error ? error.message : "Error cargando archivos.");
@@ -507,6 +583,23 @@ async function moveItem(path: string) {
   await loadFiles();
 }
 
+async function moveSelectedItems() {
+  if (!selectedPaths.size) return;
+  const destination = window.prompt("Mover seleccionados a carpeta. Deja vacío para Inicio.", currentPath);
+  if (destination === null) return;
+
+  for (const path of selectedPaths) {
+    const response = await postJson("/api/move", { path, destination });
+    if (!response.ok) {
+      showError(`No se pudo mover: ${path}`);
+      break;
+    }
+  }
+
+  selectedPaths = new Set();
+  await refreshAll();
+}
+
 async function shareItem(path: string) {
   const hoursRaw = window.prompt("Horas de validez del link", "1");
   if (!hoursRaw) return;
@@ -518,21 +611,20 @@ async function shareItem(path: string) {
   window.alert(`Link copiado:\n${absoluteUrl}\nVence: ${formatDate(data.expiresAt)}`);
 }
 
-async function uploadFiles(files: File[]) {
-  if (!files.length || role !== "admin") return;
+async function uploadFiles(candidates: UploadCandidate[]) {
+  if (!candidates.length || role !== "admin") return;
 
   const status = document.querySelector<HTMLDivElement>("#upload-status");
   const progress = document.querySelector<HTMLSpanElement>("#progress-bar");
   const formData = new FormData();
 
-  files.forEach((file) => {
-    const relativePath = "webkitRelativePath" in file && file.webkitRelativePath ? file.webkitRelativePath : file.name;
+  candidates.forEach(({ file, relativePath }) => {
     formData.append("files", file, relativePath);
   });
 
   await uploadWithProgress(`/api/upload?path=${encodeURIComponent(currentPath)}`, formData, (percent) => {
     if (progress) progress.style.width = `${percent}%`;
-    if (status) status.textContent = `Subiendo ${files.length} archivo${files.length === 1 ? "" : "s"}... ${percent}%`;
+    if (status) status.textContent = `Subiendo ${candidates.length} archivo${candidates.length === 1 ? "" : "s"}... ${percent}%`;
   })
     .then(async () => {
       if (status) status.textContent = "Subida lista.";
@@ -543,9 +635,92 @@ async function uploadFiles(files: File[]) {
     });
 }
 
+function filesToUploadCandidates(files: File[]) {
+  return files.map((file) => ({
+    file,
+    relativePath: file.webkitRelativePath || file.name
+  }));
+}
+
+async function uploadDroppedItems(dataTransfer: DataTransfer | null) {
+  if (!dataTransfer) return;
+
+  const entries = Array.from(dataTransfer.items ?? [])
+    .map((item) => {
+      const maybeItem = item as {
+        webkitGetAsEntry?: () => FileSystemEntryLike | null;
+      };
+      return maybeItem.webkitGetAsEntry?.() ?? null;
+    })
+    .filter((entry): entry is FileSystemEntryLike => entry !== null);
+
+  if (!entries.length) {
+    await uploadFiles(filesToUploadCandidates(Array.from(dataTransfer.files ?? [])));
+    return;
+  }
+
+  const candidates = (await Promise.all(entries.map((entry) => readDroppedEntry(entry, "")))).flat();
+  await uploadFiles(candidates);
+}
+
+async function readDroppedEntry(entry: FileSystemEntryLike, parentPath: string): Promise<UploadCandidate[]> {
+  const entryPath = [parentPath, entry.name].filter(Boolean).join("/");
+
+  if (entry.isFile) {
+    const file = await readFileEntry(entry as FileSystemFileEntryLike);
+    return [{ file, relativePath: entryPath }];
+  }
+
+  if (entry.isDirectory) {
+    const children = await readDirectoryEntry(entry as FileSystemDirectoryEntryLike);
+    const nested = await Promise.all(children.map((child) => readDroppedEntry(child, entryPath)));
+    return nested.flat();
+  }
+
+  return [];
+}
+
+function readFileEntry(entry: FileSystemFileEntryLike) {
+  return new Promise<File>((resolve, reject) => {
+    entry.file(resolve, reject);
+  });
+}
+
+async function readDirectoryEntry(entry: FileSystemDirectoryEntryLike) {
+  const reader = entry.createReader();
+  const entries: FileSystemEntryLike[] = [];
+
+  while (true) {
+    const batch = await new Promise<FileSystemEntryLike[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+
+    if (!batch.length) break;
+    entries.push(...batch);
+  }
+
+  return entries;
+}
+
 async function deleteItem(path: string) {
   const response = await fetch(`/api/files?path=${encodeURIComponent(path)}`, { method: "DELETE" });
   if (!response.ok) return showError("No se pudo mover a papelera.");
+  await refreshAll();
+}
+
+async function deleteSelectedItems() {
+  if (!selectedPaths.size) return;
+  if (!window.confirm(`Mover ${selectedPaths.size} elemento${selectedPaths.size === 1 ? "" : "s"} a la papelera?`)) return;
+
+  for (const path of selectedPaths) {
+    const response = await fetch(`/api/files?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+    if (!response.ok) {
+      showError(`No se pudo mover a papelera: ${path}`);
+      break;
+    }
+  }
+
+  selectedPaths = new Set();
   await refreshAll();
 }
 

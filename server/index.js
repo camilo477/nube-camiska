@@ -571,6 +571,7 @@ function streamMultipartFiles(request, targetDir, relativePath) {
   return new Promise((resolve, reject) => {
     const busboy = Busboy({
       headers: request.headers,
+      preservePath: true,
       limits: {
         fileSize: maxFileBytes
       }
