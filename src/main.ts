@@ -230,6 +230,13 @@ function trashPanel() {
 
 function fileRow(item: CloudItem) {
   const canPreview = item.type === "file" && isPreviewable(item);
+  const primaryAction =
+    item.type === "folder"
+      ? `<button class="file-action open-folder" data-path="${escapeAttribute(item.path)}" type="button">Abrir</button>`
+      : canPreview
+        ? `<button class="file-action open-preview" data-path="${escapeAttribute(item.path)}" type="button">${icon(iconForItem(item), 15)} Ver</button>`
+        : `<a class="file-action" href="${item.url}" target="_blank" rel="noreferrer">${icon("download", 15)} Descargar</a>`;
+
   return `
     <article class="file-row">
       <button class="file-main ${item.type === "folder" ? "open-folder" : canPreview ? "open-preview" : ""}" data-path="${escapeAttribute(item.path)}" type="button">
@@ -240,7 +247,7 @@ function fileRow(item: CloudItem) {
         </span>
       </button>
       <div class="file-actions">
-        ${item.type === "folder" ? `<button class="file-action open-folder" data-path="${escapeAttribute(item.path)}" type="button">Abrir</button>` : `<a class="file-action" href="${item.url}" target="_blank" rel="noreferrer">${icon("download", 15)} Ver</a>`}
+        ${primaryAction}
         ${itemActions(item)}
       </div>
     </article>
@@ -258,7 +265,7 @@ function galleryCard(item: CloudItem) {
         <small>${item.type === "folder" ? "Carpeta" : formatBytes(item.size ?? 0)}</small>
       </div>
       <div class="file-actions compact">
-        ${item.type === "folder" ? `<button class="file-action open-folder" data-path="${escapeAttribute(item.path)}" type="button">Abrir</button>` : `<a class="file-action" href="${item.url}" target="_blank" rel="noreferrer">Ver</a>`}
+        ${item.type === "folder" ? `<button class="file-action open-folder" data-path="${escapeAttribute(item.path)}" type="button">Abrir</button>` : isPreviewable(item) ? `<button class="file-action open-preview" data-path="${escapeAttribute(item.path)}" type="button">Ver</button>` : `<a class="file-action" href="${item.url}" target="_blank" rel="noreferrer">Descargar</a>`}
         ${itemActions(item)}
       </div>
     </article>
