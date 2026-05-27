@@ -109,6 +109,9 @@ let isDragging = false;
 let previewPath: string | null = null;
 let previewText: string | null = null;
 let previewTextLoading = false;
+let noteDraftOpen = false;
+let noteDraftTitle = "";
+let noteDraftContent = "";
 let selectedPaths = new Set<string>();
 
 const appRoot = document.querySelector<HTMLDivElement>("#root");
@@ -199,6 +202,7 @@ function render(errorMessage = "") {
         </div>
       </section>
       ${previewPath ? previewModal() : ""}
+      ${noteDraftOpen ? noteEditorModal() : ""}
     </main>
   `;
 
@@ -363,6 +367,35 @@ function previewModal() {
   `;
 }
 
+function noteEditorModal() {
+  return `
+    <section class="viewer-backdrop" role="dialog" aria-modal="true" aria-label="Nueva nota">
+      <div class="note-editor-shell">
+        <header class="viewer-header">
+          <div>
+            <strong>Nueva nota</strong>
+            <small>Se guarda en carpeta Notas</small>
+          </div>
+          <div class="viewer-actions">
+            <button class="secondary-action" id="cancel-note-button" type="button">Cancelar</button>
+            <button class="secondary-action" id="save-note-button" type="button">${icon("edit", 15)} Guardar nota</button>
+          </div>
+        </header>
+        <div class="note-editor-body">
+          <label class="note-title-field">
+            <span>Título</span>
+            <input id="note-title-input" type="text" value="${escapeAttribute(noteDraftTitle)}" placeholder="nota-rapida" />
+          </label>
+          <label class="note-content-field">
+            <span>Contenido</span>
+            <textarea id="note-content-input" placeholder="Escribe tu nota...">${escapeHtml(noteDraftContent)}</textarea>
+          </label>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function largePreviewFor(item: CloudItem) {
   if (!item.url) return "";
   if (item.mediaType === "image") return `<img class="viewer-image" src="${item.url}" alt="${escapeAttribute(item.name)}" />`;
@@ -494,6 +527,16 @@ function bindEvents() {
     previewTextLoading = false;
     render();
   });
+  document.querySelector("#cancel-note-button")?.addEventListener("click", () => {
+    closeNoteEditor();
+  });
+  document.querySelector("#save-note-button")?.addEventListener("click", () => void submitNoteDraft());
+  document.querySelector<HTMLInputElement>("#note-title-input")?.addEventListener("input", (event) => {
+    noteDraftTitle = (event.currentTarget as HTMLInputElement).value;
+  });
+  document.querySelector<HTMLTextAreaElement>("#note-content-input")?.addEventListener("input", (event) => {
+    noteDraftContent = (event.currentTarget as HTMLTextAreaElement).value;
+  });
   document.querySelector(".viewer-backdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {
       previewPath = null;
@@ -594,12 +637,26 @@ async function createFolder() {
 
 async function createNote() {
   if (role !== "admin") return;
-  const titleRaw = window.prompt("Título de la nota", `nota-${new Date().toISOString().slice(0, 10)}`);
-  if (!titleRaw) return;
-  const text = window.prompt("Contenido de la nota", "");
-  if (text === null) return;
-  const response = await postJson("/api/notes", { title: titleRaw, text });
+  noteDraftTitle = `nota-${new Date().toISOString().slice(0, 10)}`;
+  noteDraftContent = "";
+  noteDraftOpen = true;
+  previewPath = null;
+  previewText = null;
+  previewTextLoading = false;
+  render();
+}
+
+function closeNoteEditor() {
+  noteDraftOpen = false;
+  render();
+}
+
+async function submitNoteDraft() {
+  const titleRaw = noteDraftTitle.trim();
+  if (!titleRaw) return showError("Título obligatorio.");
+  const response = await postJson("/api/notes", { title: titleRaw, text: noteDraftContent });
   if (!response.ok) return showError("No se pudo crear la nota.");
+  noteDraftOpen = false;
   currentPath = "Notas";
   await loadFiles();
 }
