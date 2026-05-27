@@ -68,6 +68,19 @@ docker run -d \
   -e CLOUD_STORAGE_DIR="/data" \
   -v /ruta/del/disco/nube:/data \
   nube-camiska
+
+## Notas rápidas
+
+Además de pasar archivos entre dispositivos, puedes usar la nube para pasarte texto/notas rápidas.
+
+La forma más simple es crear archivos `.txt` dentro de tu carpeta de nube:
+
+1. Entra a la nube desde cualquier dispositivo.
+2. Crea una carpeta llamada `Notas` (opcional, para mantener orden).
+3. Crea un archivo nuevo, por ejemplo: `nota-rapida-2026-05-27.txt`.
+4. Escribe el texto y guarda.
+
+Así tendrás una sección práctica de notas sincronizadas entre tus dispositivos sin cambiar el flujo actual de la app.
 ```
 
 El reverse proxy o Cloudflare Tunnel puede apuntar el dominio privado a:

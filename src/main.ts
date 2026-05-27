@@ -142,9 +142,9 @@ function render(errorMessage = "") {
 
       <section class="hero">
         <div class="hero-content">
-          <div class="eyebrow">${icon("cloud", 16)} Raspberry personal</div>
-          <h1>Archivos en tu nube.</h1>
-          <p>Sube, organiza, comparte y previsualiza archivos del disco conectado a la Raspberry.</p>
+          <div class="eyebrow">${icon("cloud", 16)} Nodo Raspberry</div>
+          <h1>Gestor de archivos</h1>
+          <p>Transferencia y consulta de archivos entre dispositivos.</p>
         </div>
       </section>
 
