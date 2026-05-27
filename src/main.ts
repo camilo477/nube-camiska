@@ -107,6 +107,8 @@ let viewMode: ViewMode = "list";
 let dashboard: Dashboard | null = null;
 let isDragging = false;
 let previewPath: string | null = null;
+let previewText: string | null = null;
+let previewTextLoading = false;
 let selectedPaths = new Set<string>();
 
 const appRoot = document.querySelector<HTMLDivElement>("#root");
@@ -163,7 +165,9 @@ function render(errorMessage = "") {
               <h2>${escapeHtml(currentPath || "Inicio")}</h2>
             </div>
             <div class="header-actions">
+              <button class="secondary-action" id="open-notes-button" type="button">${icon("file", 16)} Notas</button>
               ${parentPath !== null ? `<button class="secondary-action" id="back-button" type="button">${icon("arrow-left", 16)} Atrás</button>` : ""}
+              ${role === "admin" ? `<button class="secondary-action" id="new-note-button" type="button">${icon("edit", 16)} Nueva nota</button>` : ""}
               ${role === "admin" ? `<button class="secondary-action" id="new-folder-button" type="button">${icon("plus", 16)} Nueva carpeta</button>` : ""}
             </div>
           </div>
@@ -365,6 +369,11 @@ function largePreviewFor(item: CloudItem) {
   if (item.mediaType === "video") return `<video class="viewer-video" src="${item.url}" controls autoplay preload="metadata"></video>`;
   if (item.mediaType === "audio") return `<audio class="viewer-audio" src="${item.url}" controls autoplay preload="metadata"></audio>`;
   if (item.mediaType === "document" && item.name.toLowerCase().endsWith(".pdf")) return `<iframe class="viewer-document" src="${item.url}" title="${escapeAttribute(item.name)}"></iframe>`;
+  if (isTextNote(item)) {
+    if (previewTextLoading) return `<div class="note-preview"><strong>Cargando nota...</strong></div>`;
+    if (previewText !== null) return `<pre class="note-preview">${escapeHtml(previewText)}</pre>`;
+    return `<div class="note-preview"><strong>No se pudo cargar la nota.</strong></div>`;
+  }
   return `<div class="empty-state">${icon(iconForItem(item), 44)}<strong>Sin vista previa</strong></div>`;
 }
 
@@ -400,10 +409,15 @@ function emptyState() {
 
 function bindEvents() {
   document.querySelector("#refresh-button")?.addEventListener("click", () => void refreshAll());
+  document.querySelector("#open-notes-button")?.addEventListener("click", () => {
+    currentPath = "Notas";
+    void loadFiles();
+  });
   document.querySelector("#back-button")?.addEventListener("click", () => {
     currentPath = parentPath ?? "";
     void loadFiles();
   });
+  document.querySelector("#new-note-button")?.addEventListener("click", () => void createNote());
   document.querySelector("#new-folder-button")?.addEventListener("click", () => void createFolder());
   document.querySelector("#empty-trash-button")?.addEventListener("click", () => void emptyTrash());
   document.querySelector("#bulk-move-button")?.addEventListener("click", () => void moveSelectedItems());
@@ -462,11 +476,22 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>(".open-preview").forEach((button) => {
     button.addEventListener("click", () => {
       previewPath = button.dataset.path ?? null;
+      previewText = null;
+      previewTextLoading = false;
+      const item = items.find((candidate) => candidate.path === previewPath);
+      if (item && isTextNote(item)) {
+        previewTextLoading = true;
+        render();
+        void loadNotePreview(item.path);
+        return;
+      }
       render();
     });
   });
   document.querySelector("#close-preview-button")?.addEventListener("click", () => {
     previewPath = null;
+    previewText = null;
+    previewTextLoading = false;
     render();
   });
   document.querySelector(".viewer-backdrop")?.addEventListener("click", (event) => {
@@ -565,6 +590,35 @@ async function createFolder() {
   const response = await postJson("/api/folders", { path: currentPath, name });
   if (!response.ok) return showError("No se pudo crear la carpeta.");
   await loadFiles();
+}
+
+async function createNote() {
+  if (role !== "admin") return;
+  const titleRaw = window.prompt("Título de la nota", `nota-${new Date().toISOString().slice(0, 10)}`);
+  if (!titleRaw) return;
+  const text = window.prompt("Contenido de la nota", "");
+  if (text === null) return;
+  const response = await postJson("/api/notes", { title: titleRaw, text });
+  if (!response.ok) return showError("No se pudo crear la nota.");
+  currentPath = "Notas";
+  await loadFiles();
+}
+
+async function loadNotePreview(notePath: string) {
+  try {
+    const response = await fetch(`/api/notes/preview?path=${encodeURIComponent(notePath)}`);
+    if (!response.ok) throw new Error("No se pudo cargar la nota.");
+    const data = (await response.json()) as { content: string };
+    if (previewPath !== notePath) return;
+    previewText = data.content;
+  } catch {
+    if (previewPath === notePath) previewText = null;
+  } finally {
+    if (previewPath === notePath) {
+      previewTextLoading = false;
+      render();
+    }
+  }
 }
 
 async function renameItem(path: string, currentName: string) {
@@ -789,8 +843,13 @@ function isPreviewable(item: CloudItem) {
     (item.mediaType === "image" ||
       item.mediaType === "video" ||
       item.mediaType === "audio" ||
-      (item.mediaType === "document" && item.name.toLowerCase().endsWith(".pdf")))
+      (item.mediaType === "document" && (item.name.toLowerCase().endsWith(".pdf") || isTextNote(item))))
   );
+}
+
+function isTextNote(item: CloudItem) {
+  const lowerName = item.name.toLowerCase();
+  return item.mediaType === "document" && (lowerName.endsWith(".txt") || lowerName.endsWith(".md"));
 }
 
 function formatBytes(bytes: number) {

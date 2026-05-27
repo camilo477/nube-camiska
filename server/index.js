@@ -107,6 +107,17 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/notes" && request.method === "POST") {
+      requireAdmin(auth.user);
+      await createNote(request, response, auth);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/notes/preview" && request.method === "GET") {
+      await sendNotePreview(requestUrl, response);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/upload" && request.method === "POST") {
       requireAdmin(auth.user);
       await receiveUpload(request, requestUrl, response, auth);
@@ -311,6 +322,49 @@ async function createFolder(request, requestUrl, response, auth) {
   await fs.mkdir(toStoragePath(folderPath), { recursive: false });
   await writeLog(auth, request, "create_folder", folderPath);
   sendJson(response, 201, { path: folderPath });
+}
+
+async function createNote(request, response, auth) {
+  const body = await readJson(request);
+  const title = sanitizeName(body.title ?? "nota");
+  const extension = path.extname(title).toLowerCase();
+  const baseName = extension ? title.slice(0, -extension.length) : title;
+  const fileName = `${baseName}.txt`;
+  const content = String(body.text ?? "");
+  const notesDirRelative = "Notas";
+  const notesDirAbsolute = toStoragePath(notesDirRelative);
+  await fs.mkdir(notesDirAbsolute, { recursive: true });
+  const relativePath = joinRelative(notesDirRelative, fileName);
+  const absolutePath = toStoragePath(relativePath);
+  await fs.writeFile(absolutePath, `${content}\n`, "utf8");
+  const checksum = createHash("sha256").update(content).digest("hex");
+  await setChecksum(relativePath, checksum);
+  await writeLog(auth, request, "create_note", relativePath, { size: Buffer.byteLength(content, "utf8"), checksum });
+  sendJson(response, 201, { path: relativePath });
+}
+
+async function sendNotePreview(requestUrl, response) {
+  const relativePath = normalizeRelativePath(requestUrl.searchParams.get("path") ?? "");
+  if (!relativePath) {
+    sendJson(response, 400, { error: "path_required" });
+    return;
+  }
+
+  if (!/(\.txt|\.md)$/i.test(relativePath)) {
+    sendJson(response, 400, { error: "text_note_required" });
+    return;
+  }
+
+  const absolutePath = toStoragePath(relativePath);
+  const stat = await fs.stat(absolutePath);
+  if (!stat.isFile()) {
+    sendJson(response, 404, { error: "not_found" });
+    return;
+  }
+
+  const maxPreviewBytes = 1024 * 256;
+  const fileContent = await fs.readFile(absolutePath, "utf8");
+  sendJson(response, 200, { content: fileContent.slice(0, maxPreviewBytes) });
 }
 
 async function receiveUpload(request, requestUrl, response, auth) {
