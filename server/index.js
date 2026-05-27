@@ -113,6 +113,12 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/notes" && request.method === "PUT") {
+      requireAdmin(auth.user);
+      await updateNote(request, response, auth);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/notes/preview" && request.method === "GET") {
       await sendNotePreview(requestUrl, response);
       return;
@@ -336,11 +342,39 @@ async function createNote(request, response, auth) {
   await fs.mkdir(notesDirAbsolute, { recursive: true });
   const relativePath = joinRelative(notesDirRelative, fileName);
   const absolutePath = toStoragePath(relativePath);
-  await fs.writeFile(absolutePath, `${content}\n`, "utf8");
+  await fs.writeFile(absolutePath, content, "utf8");
   const checksum = createHash("sha256").update(content).digest("hex");
   await setChecksum(relativePath, checksum);
   await writeLog(auth, request, "create_note", relativePath, { size: Buffer.byteLength(content, "utf8"), checksum });
   sendJson(response, 201, { path: relativePath });
+}
+
+async function updateNote(request, response, auth) {
+  const body = await readJson(request);
+  const relativePath = normalizeRelativePath(body.path ?? "");
+  if (!relativePath) {
+    sendJson(response, 400, { error: "path_required" });
+    return;
+  }
+
+  if (!/(\.txt|\.md)$/i.test(relativePath)) {
+    sendJson(response, 400, { error: "text_note_required" });
+    return;
+  }
+
+  const content = String(body.text ?? "");
+  const absolutePath = toStoragePath(relativePath);
+  const stat = await fs.stat(absolutePath);
+  if (!stat.isFile()) {
+    sendJson(response, 404, { error: "not_found" });
+    return;
+  }
+
+  await fs.writeFile(absolutePath, content, "utf8");
+  const checksum = createHash("sha256").update(content).digest("hex");
+  await setChecksum(relativePath, checksum);
+  await writeLog(auth, request, "update_note", relativePath, { size: Buffer.byteLength(content, "utf8"), checksum });
+  sendJson(response, 200, { path: relativePath });
 }
 
 async function sendNotePreview(requestUrl, response) {

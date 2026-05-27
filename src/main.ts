@@ -112,6 +112,7 @@ let previewTextLoading = false;
 let noteDraftOpen = false;
 let noteDraftTitle = "";
 let noteDraftContent = "";
+let noteDraftPath: string | null = null;
 let selectedPaths = new Set<string>();
 
 const appRoot = document.querySelector<HTMLDivElement>("#root");
@@ -368,23 +369,24 @@ function previewModal() {
 }
 
 function noteEditorModal() {
+  const isEditing = noteDraftPath !== null;
   return `
     <section class="viewer-backdrop" role="dialog" aria-modal="true" aria-label="Nueva nota">
       <div class="note-editor-shell">
         <header class="viewer-header">
           <div>
-            <strong>Nueva nota</strong>
-            <small>Se guarda en carpeta Notas</small>
+            <strong>${isEditing ? "Editar nota" : "Nueva nota"}</strong>
+            <small>${isEditing ? escapeHtml(noteDraftPath ?? "") : "Se guarda en carpeta Notas"}</small>
           </div>
           <div class="viewer-actions">
             <button class="secondary-action" id="cancel-note-button" type="button">Cancelar</button>
-            <button class="secondary-action" id="save-note-button" type="button">${icon("edit", 15)} Guardar nota</button>
+            <button class="secondary-action" id="save-note-button" type="button">${icon("edit", 15)} ${isEditing ? "Actualizar nota" : "Guardar nota"}</button>
           </div>
         </header>
         <div class="note-editor-body">
           <label class="note-title-field">
             <span>Título</span>
-            <input id="note-title-input" type="text" value="${escapeAttribute(noteDraftTitle)}" placeholder="nota-rapida" />
+            <input id="note-title-input" type="text" value="${escapeAttribute(noteDraftTitle)}" placeholder="nota-rapida" ${isEditing ? "disabled" : ""} />
           </label>
           <label class="note-content-field">
             <span>Contenido</span>
@@ -416,6 +418,7 @@ function itemActions(item: CloudItem) {
   return `
     <button class="icon-action rename-action" data-path="${escapeAttribute(item.path)}" data-name="${escapeAttribute(item.name)}" type="button" aria-label="Renombrar" title="Renombrar">${icon("edit", 15)}</button>
     <button class="icon-action move-action" data-path="${escapeAttribute(item.path)}" type="button" aria-label="Mover" title="Mover">${icon("move", 15)}</button>
+    ${item.type === "file" && isTextNote(item) ? `<button class="icon-action edit-note-action" data-path="${escapeAttribute(item.path)}" data-name="${escapeAttribute(item.name)}" type="button" aria-label="Editar nota" title="Editar nota">${icon("file", 15)}</button>` : ""}
     ${item.type === "file" ? `<button class="icon-action share-action" data-path="${escapeAttribute(item.path)}" type="button" aria-label="Compartir" title="Compartir">${icon("share", 15)}</button>` : ""}
     <button class="danger-action delete-action" data-path="${escapeAttribute(item.path)}" data-name="${escapeAttribute(item.name)}" type="button" aria-label="Eliminar" title="Eliminar">${icon("trash", 15)}</button>
   `;
@@ -552,6 +555,9 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>(".move-action").forEach((button) => {
     button.addEventListener("click", () => void moveItem(button.dataset.path ?? ""));
   });
+  document.querySelectorAll<HTMLButtonElement>(".edit-note-action").forEach((button) => {
+    button.addEventListener("click", () => void editNote(button.dataset.path ?? "", button.dataset.name ?? ""));
+  });
   document.querySelectorAll<HTMLButtonElement>(".share-action").forEach((button) => {
     button.addEventListener("click", () => void shareItem(button.dataset.path ?? ""));
   });
@@ -639,6 +645,7 @@ async function createNote() {
   if (role !== "admin") return;
   noteDraftTitle = `nota-${new Date().toISOString().slice(0, 10)}`;
   noteDraftContent = "";
+  noteDraftPath = null;
   noteDraftOpen = true;
   previewPath = null;
   previewText = null;
@@ -646,17 +653,48 @@ async function createNote() {
   render();
 }
 
+async function editNote(notePath: string, noteName: string) {
+  if (role !== "admin" || !notePath) return;
+  try {
+    const response = await fetch(`/api/notes/preview?path=${encodeURIComponent(notePath)}`);
+    if (!response.ok) throw new Error("No se pudo cargar la nota.");
+    const data = (await response.json()) as { content: string };
+    noteDraftPath = notePath;
+    noteDraftTitle = noteName.replace(/\.(txt|md)$/i, "");
+    noteDraftContent = data.content;
+    noteDraftOpen = true;
+    previewPath = null;
+    previewText = null;
+    previewTextLoading = false;
+    render();
+  } catch {
+    showError("No se pudo abrir la nota para edición.");
+  }
+}
+
 function closeNoteEditor() {
   noteDraftOpen = false;
+  noteDraftPath = null;
   render();
 }
 
 async function submitNoteDraft() {
-  const titleRaw = noteDraftTitle.trim();
-  if (!titleRaw) return showError("Título obligatorio.");
-  const response = await postJson("/api/notes", { title: titleRaw, text: noteDraftContent });
-  if (!response.ok) return showError("No se pudo crear la nota.");
+  let response: Response;
+  if (noteDraftPath) {
+    response = await fetch("/api/notes", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: noteDraftPath, text: noteDraftContent })
+    });
+    if (!response.ok) return showError("No se pudo actualizar la nota.");
+  } else {
+    const titleRaw = noteDraftTitle.trim();
+    if (!titleRaw) return showError("Título obligatorio.");
+    response = await postJson("/api/notes", { title: titleRaw, text: noteDraftContent });
+    if (!response.ok) return showError("No se pudo crear la nota.");
+  }
   noteDraftOpen = false;
+  noteDraftPath = null;
   currentPath = "Notas";
   await loadFiles();
 }
