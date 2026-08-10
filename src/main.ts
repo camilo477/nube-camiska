@@ -211,6 +211,7 @@ function showPwaUpdate(registration: ServiceWorkerRegistration) {
 function renderLogin() {
   authenticated = false;
   document.body.classList.add("login-page");
+  document.body.classList.remove("drawer-open");
   rootElement.innerHTML = `
     <main class="login-shell">
       <section class="login-art" aria-hidden="true">
@@ -263,10 +264,11 @@ async function submitLogin(event: Event) {
 function renderApp(error = "") {
   if (!authenticated) return renderLogin();
   document.body.classList.remove("login-page");
+  document.body.classList.remove("drawer-open");
   rootElement.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar">
-        <a class="brand" href="#">${icon("cloud", 27)}<span>Nube <b>Camiska</b></span></a>
+        <div class="sidebar-heading"><a class="brand" href="#">${icon("cloud", 27)}<span>Nube <b>Camiska</b></span></a><button class="close-mobile-menu" id="close-mobile-menu" type="button" aria-label="Cerrar menú">${icon("close", 21)}</button></div>
         ${role === "admin" ? `<button class="primary-button upload-main" id="pick-files">${icon("plus", 19)} Subir archivos</button><button class="folder-upload" id="pick-folder">${icon("folder", 16)} Subir una carpeta</button><input class="hidden-input" id="file-input" type="file" multiple><input class="hidden-input" id="folder-input" type="file" webkitdirectory multiple>` : ""}
         <nav class="side-nav" aria-label="Secciones">
           ${navItem("files", "home", "Mis archivos")}${navItem("recent", "clock", "Recientes")}${navItem("photos", "image", "Fotos")}${navItem("videos", "video", "Videos")}<button class="nav-item ${section === "files" && currentPath === "Notas" ? "active" : ""}" id="open-notes">${icon("edit", 20)}<span>Notas</span></button>${role === "admin" ? `<span class="nav-separator"></span>${navItem("trash", "trash", "Papelera")}` : ""}
@@ -276,6 +278,7 @@ function renderApp(error = "") {
           <button class="profile" id="logout"><span class="avatar">${escapeHtml(user.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(user)}</b><small>${role === "admin" ? "Administrador" : "Solo lectura"}</small></span>${icon("logout", 17)}</button>
         </div>
       </aside>
+      <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="Cerrar menú"></button>
       <div class="main-area">
         <header class="topbar">
           <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menú">${icon("list", 21)}</button>
@@ -412,14 +415,16 @@ function uploadQueueMarkup() {
 }
 
 function bindAppEvents() {
-  document.querySelectorAll<HTMLElement>("[data-section]").forEach(button => button.addEventListener("click", () => { section = button.dataset.section as Section; currentPath = ""; query = ""; selected.clear(); void loadSection(); }));
+  document.querySelectorAll<HTMLElement>("[data-section]").forEach(button => button.addEventListener("click", () => { toggleMobileSidebar(false); section = button.dataset.section as Section; currentPath = ""; query = ""; selected.clear(); void loadSection(); }));
   document.querySelector("#logout")?.addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); authenticated = false; renderLogin(); });
-  document.querySelector("#mobile-menu")?.addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
+  document.querySelector("#mobile-menu")?.addEventListener("click", () => toggleMobileSidebar(true));
+  document.querySelector("#close-mobile-menu")?.addEventListener("click", () => toggleMobileSidebar(false));
+  document.querySelector("#sidebar-scrim")?.addEventListener("click", () => toggleMobileSidebar(false));
   document.querySelector("#install-app")?.addEventListener("click", () => void installApp());
   document.querySelector("#pick-files")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#file-input")?.click());
   document.querySelector("#pick-folder")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#folder-input")?.click());
   document.querySelector("#empty-upload")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#file-input")?.click());
-  document.querySelector("#open-notes")?.addEventListener("click", () => { section = "files"; currentPath = "Notas"; query = ""; void loadSection(); });
+  document.querySelector("#open-notes")?.addEventListener("click", () => { toggleMobileSidebar(false); section = "files"; currentPath = "Notas"; query = ""; void loadSection(); });
   document.querySelector("#new-note")?.addEventListener("click", () => { noteDraft = { path: null, title: `nota-${new Date().toISOString().slice(0, 10)}`, text: "", saving: false }; renderApp(); });
   document.querySelector("#new-folder")?.addEventListener("click", () => { dialog = { type: "folder" }; renderApp(); });
   document.querySelector("#empty-trash")?.addEventListener("click", () => { dialog = { type: "empty-trash" }; renderApp(); });
@@ -436,6 +441,12 @@ function bindAppEvents() {
   document.querySelector("#note-form")?.addEventListener("submit", event => void submitNote(event));
   document.querySelectorAll("#close-note,#cancel-note").forEach(button => button.addEventListener("click", () => { noteDraft = null; renderApp(); }));
   document.querySelector("#close-queue")?.addEventListener("click", () => { uploadTasks = []; renderApp(); });
+}
+
+function toggleMobileSidebar(open: boolean) {
+  document.querySelector(".sidebar")?.classList.toggle("open", open);
+  document.querySelector(".sidebar-scrim")?.classList.toggle("visible", open);
+  document.body.classList.toggle("drawer-open", open);
 }
 
 function bindCollectionEvents() {
@@ -622,7 +633,10 @@ function escapeHtml(value: string) { return value.replaceAll("&", "&amp;").repla
 function escapeAttribute(value: string) { return escapeHtml(value); }
 
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape") { if (previewPath || dialog || menuPath) { previewPath = null; dialog = null; menuPath = null; renderApp(); } }
+  if (event.key === "Escape") {
+    if (document.querySelector(".sidebar.open")) toggleMobileSidebar(false);
+    if (previewPath || dialog || menuPath) { previewPath = null; dialog = null; menuPath = null; renderApp(); }
+  }
   if (previewPath && event.key === "ArrowLeft") movePreview(-1);
   if (previewPath && event.key === "ArrowRight") movePreview(1);
 });
