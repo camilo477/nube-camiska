@@ -20,6 +20,10 @@ type UploadCandidate = { file: File; relativePath: string };
 type UploadTask = UploadCandidate & { id: string; progress: number; status: "waiting" | "uploading" | "done" | "error" };
 type DialogState = { type: "folder" | "rename" | "move" | "share" | "delete" | "empty-trash"; item?: CloudItem; paths?: string[] };
 type NoteDraft = { path: string | null; title: string; text: string; saving: boolean };
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
 type FileSystemEntryLike = { name: string; isFile: boolean; isDirectory: boolean };
 type FileSystemFileEntryLike = FileSystemEntryLike & { file: (ok: (file: File) => void, fail?: (error: DOMException) => void) => void };
 type FileSystemDirectoryEntryLike = FileSystemEntryLike & { createReader: () => { readEntries: (ok: (entries: FileSystemEntryLike[]) => void, fail?: (error: DOMException) => void) => void } };
@@ -74,17 +78,134 @@ let dialog: DialogState | null = null;
 let noteDraft: NoteDraft | null = null;
 let uploadTasks: UploadTask[] = [];
 let toastTimer = 0;
+let installPrompt: InstallPromptEvent | null = null;
+let serviceWorkerRefreshing = false;
+const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
 
+setupPwa();
 void boot();
 
 async function boot() {
-  const response = await fetch("/api/me");
-  if (!response.ok) return renderLogin();
-  const me = await response.json() as { user: string; role: Role };
-  authenticated = true;
-  user = me.user;
-  role = me.role;
-  await Promise.all([loadDashboard(), loadSection()]);
+  try {
+    const response = await fetch("/api/me");
+    if (!response.ok) return renderLogin();
+    const me = await response.json() as { user: string; role: Role };
+    authenticated = true;
+    user = me.user;
+    role = me.role;
+    await Promise.all([loadDashboard(), loadSection()]);
+  } catch {
+    renderOffline();
+  }
+}
+
+function renderOffline() {
+  document.body.classList.remove("login-page");
+  rootElement.innerHTML = `<main class="offline-shell"><img src="/icons/icon-192.png" alt=""><span>Sin conexión</span><h1>Tu nube no está disponible</h1><p>La aplicación está instalada y lista. Conéctate a internet o comprueba que la Raspberry esté encendida para acceder a tus archivos.</p><button class="primary-button" id="retry-connection" type="button">Intentar de nuevo</button><small>Por seguridad, los archivos privados no se guardan en la caché offline.</small></main>`;
+  document.querySelector("#retry-connection")?.addEventListener("click", () => void boot());
+}
+
+function setupPwa() {
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    installPrompt = event as InstallPromptEvent;
+    refreshInstallControls();
+  });
+
+  window.addEventListener("appinstalled", () => {
+    installPrompt = null;
+    refreshInstallControls();
+    showPwaNotice("Nube Camiska quedó instalada en este dispositivo.");
+  });
+
+  window.addEventListener("offline", () => showPwaNotice("Sin conexión. Tus archivos privados no se guardan offline."));
+  window.addEventListener("online", () => showPwaNotice("Conexión restablecida."));
+
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+  window.addEventListener("load", () => void registerServiceWorker());
+}
+
+async function registerServiceWorker() {
+  try {
+    const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    if (registration.waiting) showPwaUpdate(registration);
+
+    registration.addEventListener("updatefound", () => {
+      const worker = registration.installing;
+      worker?.addEventListener("statechange", () => {
+        if (worker.state === "installed" && navigator.serviceWorker.controller) showPwaUpdate(registration);
+      });
+    });
+
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (serviceWorkerRefreshing) return;
+      serviceWorkerRefreshing = true;
+      window.location.reload();
+    });
+
+    await registration.update();
+  } catch {
+    // La aplicación web continúa funcionando aunque el navegador no admita PWA.
+  }
+}
+
+function canOfferInstall() {
+  return !isStandalone() && (installPrompt !== null || isIos);
+}
+
+function refreshInstallControls() {
+  document.querySelectorAll<HTMLButtonElement>("#install-app").forEach((button) => {
+    button.hidden = !canOfferInstall();
+  });
+}
+
+async function installApp() {
+  if (installPrompt) {
+    const prompt = installPrompt;
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
+    if (choice.outcome === "accepted") installPrompt = null;
+    refreshInstallControls();
+    return;
+  }
+
+  if (isIos) showPwaNotice("En Safari, abre Compartir y elige “Añadir a pantalla de inicio”.", true);
+}
+
+function showPwaNotice(message: string, persistent = false) {
+  document.querySelector(".pwa-notice")?.remove();
+  const notice = document.createElement("div");
+  notice.className = "pwa-notice";
+  const text = document.createElement("span");
+  text.textContent = message;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.setAttribute("aria-label", "Cerrar");
+  close.textContent = "×";
+  close.addEventListener("click", () => notice.remove());
+  notice.append(text, close);
+  document.body.append(notice);
+  if (!persistent) window.setTimeout(() => notice.remove(), 4500);
+}
+
+function showPwaUpdate(registration: ServiceWorkerRegistration) {
+  document.querySelector(".pwa-update")?.remove();
+  const notice = document.createElement("div");
+  notice.className = "pwa-update";
+  const text = document.createElement("span");
+  text.textContent = "Hay una nueva versión disponible.";
+  const update = document.createElement("button");
+  update.type = "button";
+  update.textContent = "Actualizar";
+  update.addEventListener("click", () => registration.waiting?.postMessage({ type: "SKIP_WAITING" }));
+  const close = document.createElement("button");
+  close.type = "button";
+  close.setAttribute("aria-label", "Cerrar");
+  close.textContent = "×";
+  close.addEventListener("click", () => notice.remove());
+  notice.append(text, update, close);
+  document.body.append(notice);
 }
 
 function renderLogin() {
@@ -109,6 +230,7 @@ function renderLogin() {
           <label>Contraseña<div class="password-field"><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Tu contraseña"><button id="toggle-password" type="button" aria-label="Mostrar contraseña">${icon("eye", 18)}</button></div></label>
           ${loginError ? `<div class="login-error">${escapeHtml(loginError)}</div>` : ""}
           <button class="primary-button login-button" type="submit"><span>Entrar a mi nube</span>${icon("chevron", 18)}</button>
+          <button class="pwa-install" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>Instalar Nube Camiska</button>
           <small class="privacy-note">${icon("cloud", 15)} Conexión privada · Tus archivos permanecen en tu servidor</small>
         </form>
       </section>
@@ -118,6 +240,7 @@ function renderLogin() {
     const input = document.querySelector<HTMLInputElement>("#login-password");
     if (input) input.type = input.type === "password" ? "text" : "password";
   });
+  document.querySelector("#install-app")?.addEventListener("click", () => void installApp());
 }
 
 async function submitLogin(event: Event) {
@@ -157,7 +280,7 @@ function renderApp(error = "") {
         <header class="topbar">
           <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menú">${icon("list", 21)}</button>
           <label class="global-search">${icon("search", 19)}<input id="search" value="${escapeAttribute(query)}" placeholder="Buscar en esta vista…"></label>
-          <div class="top-actions">${role === "admin" ? `<button class="soft-button" id="new-note">${icon("edit", 17)}<span>Nueva nota</span></button><button class="soft-button" id="new-folder" ${section !== "files" ? "disabled" : ""}>${icon("folder", 17)}<span>Nueva carpeta</span></button>` : ""}<button class="avatar top-avatar" title="${escapeAttribute(user)}">${escapeHtml(user.slice(0, 1).toUpperCase())}</button></div>
+          <div class="top-actions"><button class="soft-button install-action" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>${icon("download", 17)}<span>Instalar</span></button>${role === "admin" ? `<button class="soft-button" id="new-note">${icon("edit", 17)}<span>Nueva nota</span></button><button class="soft-button" id="new-folder" ${section !== "files" ? "disabled" : ""}>${icon("folder", 17)}<span>Nueva carpeta</span></button>` : ""}<button class="avatar top-avatar" title="${escapeAttribute(user)}">${escapeHtml(user.slice(0, 1).toUpperCase())}</button></div>
         </header>
         <main class="content">
           <div class="content-header">
@@ -292,6 +415,7 @@ function bindAppEvents() {
   document.querySelectorAll<HTMLElement>("[data-section]").forEach(button => button.addEventListener("click", () => { section = button.dataset.section as Section; currentPath = ""; query = ""; selected.clear(); void loadSection(); }));
   document.querySelector("#logout")?.addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); authenticated = false; renderLogin(); });
   document.querySelector("#mobile-menu")?.addEventListener("click", () => document.querySelector(".sidebar")?.classList.toggle("open"));
+  document.querySelector("#install-app")?.addEventListener("click", () => void installApp());
   document.querySelector("#pick-files")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#file-input")?.click());
   document.querySelector("#pick-folder")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#folder-input")?.click());
   document.querySelector("#empty-upload")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#file-input")?.click());

@@ -45,6 +45,7 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".m4a": "audio/mp4",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".mp3": "audio/mpeg",
   ".mp4": "video/mp4",
   ".ogg": "audio/ogg",
@@ -760,7 +761,8 @@ async function sendStatic(requestUrl, response) {
   const stat = await fs.stat(staticPath);
   response.writeHead(200, {
     "Content-Type": mimeTypes[path.extname(staticPath).toLowerCase()] ?? "application/octet-stream",
-    "Content-Length": stat.size
+    "Content-Length": stat.size,
+    ...(path.basename(staticPath) === "sw.js" ? { "Cache-Control": "no-cache, no-store, must-revalidate" } : {})
   });
   createReadStream(staticPath).pipe(response);
 }

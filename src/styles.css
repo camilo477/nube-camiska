@@ -21,8 +21,9 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
-body { min-height: 100vh; color: var(--text); background: var(--bg); font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+body { min-height: 100vh; color: var(--text); background: var(--bg); font-size: 14px; line-height: 1.45; overscroll-behavior-y: none; -webkit-font-smoothing: antialiased; }
 button, input, select, textarea { font: inherit; }
 button, a { color: inherit; }
 button { cursor: pointer; }
@@ -74,6 +75,8 @@ body.login-page { overflow: hidden; }
 .password-field input { padding-right: 48px; }
 .password-field button { position: absolute; top: 4px; right: 4px; display: grid; width: 40px; height: 40px; place-items: center; border: 0; color: var(--muted); background: transparent; }
 .login-button { width: 100%; height: 48px; justify-content: space-between; margin-top: 4px; padding: 0 17px; }
+.pwa-install { min-height: 38px; margin-top: 12px; border: 0; color: var(--muted); background: transparent; font-size: 11px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.pwa-install:hover { color: var(--text); }
 .login-error { margin: -5px 0 14px; border-left: 3px solid var(--danger); padding: 9px 11px; color: var(--danger); background: var(--danger-bg); font-size: 12px; }
 .privacy-note { display: flex; justify-content: center; align-items: center; gap: 7px; margin-top: 22px; color: var(--muted-2); font-size: 10px; font-weight: 400; }
 
@@ -115,6 +118,7 @@ body.login-page { overflow: hidden; }
 .global-search input { flex: 1; min-width: 0; border: 0; color: var(--text); background: transparent; outline: 0; }
 .global-search input::placeholder { color: var(--muted-2); }
 .top-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.install-action { white-space: nowrap; }
 .top-avatar { border-color: var(--line); }
 .mobile-menu { display: none; }
 .content { width: min(1500px, 100%); margin: 0 auto; padding: 32px clamp(20px, 3vw, 42px) 68px; }
@@ -260,6 +264,22 @@ body.login-page { overflow: hidden; }
 .toast { position: fixed; z-index: 70; left: 50%; bottom: 23px; max-width: calc(100vw - 30px); border: 1px solid #333; border-radius: 5px; padding: 10px 15px; color: #fff; background: #222; box-shadow: 0 6px 18px rgba(0,0,0,.16); opacity: 0; transform: translate(-50%, 12px); pointer-events: none; transition: opacity .16s, transform .16s; }
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-color: var(--danger); background: var(--danger); }
+.offline-shell { display: grid; width: min(480px, calc(100% - 40px)); min-height: 100vh; margin: 0 auto; place-items: center; align-content: center; text-align: center; }
+.offline-shell img { width: 68px; height: 68px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 10px; }
+.offline-shell > span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.offline-shell h1 { margin: 9px 0 8px; font-size: 29px; letter-spacing: -.04em; }
+.offline-shell p { margin: 0 0 22px; color: var(--muted); line-height: 1.6; }
+.offline-shell small { max-width: 340px; margin-top: 16px; color: var(--muted-2); font-size: 10px; }
+.pwa-notice, .pwa-update { position: fixed; z-index: 100; right: 18px; bottom: 18px; display: flex; max-width: min(430px, calc(100vw - 36px)); align-items: center; gap: 12px; border: 1px solid #333; border-radius: 5px; padding: 10px 11px 10px 14px; color: #fff; background: #222; box-shadow: 0 6px 18px rgba(0,0,0,.16); font-size: 11px; }
+.pwa-notice span, .pwa-update span { flex: 1; }
+.pwa-notice button, .pwa-update button { min-height: 28px; border: 0; border-radius: 3px; padding: 0 8px; color: #fff; background: #3c3c3c; font-size: 10px; font-weight: 600; }
+.pwa-notice button:last-child, .pwa-update button:last-child { width: 28px; padding: 0; font-size: 17px; font-weight: 400; }
+
+@supports (padding: max(0px)) {
+  .sidebar { padding-top: max(24px, env(safe-area-inset-top)); padding-bottom: max(17px, env(safe-area-inset-bottom)); }
+  .topbar { padding-top: env(safe-area-inset-top); }
+  .upload-queue, .pwa-notice, .pwa-update { bottom: max(18px, env(safe-area-inset-bottom)); }
+}
 
 @media (max-width: 1040px) {
   .login-shell { grid-template-columns: minmax(0, 1fr) 430px; }

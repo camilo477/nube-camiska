@@ -24,6 +24,8 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
 - Dashboard básico de almacenamiento y tipos de archivo.
 - Pantalla de acceso propia con sesiones seguras y las mismas credenciales configuradas en el servidor.
 - Bibliotecas globales de archivos recientes, fotos y videos.
+- PWA instalable en Android, iPhone/iPad y computadores, con iconos adaptativos,
+  modo independiente, actualizaciones y una pantalla segura sin conexión.
 - Logs diarios en `.logs/YYYY-MM-DD.log`.
 - Checksum SHA-256 para archivos subidos.
 - Bloqueo de IP tras varios intentos fallidos.
@@ -47,6 +49,18 @@ npm start
 ```
 
 Luego abre `http://localhost:8080`.
+
+## Instalar como aplicación
+
+En producción abre la nube mediante su dominio HTTPS. En Android y navegadores
+de escritorio aparecerá la acción **Instalar** dentro de la aplicación o en la
+barra del navegador. En iPhone/iPad abre el menú **Compartir** de Safari y elige
+**Añadir a pantalla de inicio**.
+
+El service worker guarda únicamente la interfaz estática necesaria para iniciar
+la aplicación. Por seguridad, nunca almacena en caché respuestas de `/api`,
+`/files` ni `/share`; los archivos privados siguen requiriendo conexión con la
+Raspberry.
 
 ## Docker en la Raspberry
 
