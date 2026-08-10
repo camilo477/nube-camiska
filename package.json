@@ -10,8 +10,8 @@
     "start": "node server/index.js"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
-    "vite": "^5.2.0"
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1"
   },
   "dependencies": {
     "busboy": "^1.6.0"

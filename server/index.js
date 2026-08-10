@@ -26,6 +26,10 @@ const checksumsFileName = ".checksums.json";
 
 const users = buildUsers();
 const failedAuth = new Map();
+const sessions = new Map();
+let checksumMutationQueue = Promise.resolve();
+const sessionCookieName = "camiska_session";
+const sessionDurationMs = 1000 * 60 * 60 * 24 * 14;
 
 const mimeTypes = {
   ".avif": "image/avif",
@@ -71,13 +75,24 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/login" && request.method === "POST") {
+      await login(request, response);
+      return;
+    }
+
+    if (!requestUrl.pathname.startsWith("/api/") && !requestUrl.pathname.startsWith("/files/")) {
+      await sendStatic(requestUrl, response);
+      return;
+    }
+
     const auth = authenticate(request);
     if (!auth.ok) {
-      response.writeHead(auth.status, {
-        "WWW-Authenticate": 'Basic realm="Nube Camiska"',
-        "Content-Type": "application/json; charset=utf-8"
-      });
-      response.end(JSON.stringify({ error: auth.error }));
+      sendJson(response, auth.status, { error: auth.error });
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/logout" && request.method === "POST") {
+      logout(request, response);
       return;
     }
 
@@ -93,6 +108,11 @@ const server = http.createServer(async (request, response) => {
 
     if (requestUrl.pathname === "/api/dashboard" && request.method === "GET") {
       await sendDashboard(response);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/library" && request.method === "GET") {
+      await sendLibrary(requestUrl, response);
       return;
     }
 
@@ -170,7 +190,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    await sendStatic(requestUrl, response);
+    sendJson(response, 404, { error: "not_found" });
   } catch (error) {
     console.error(error);
     const status = error.statusCode ?? 500;
@@ -223,6 +243,18 @@ function parseUsersJson() {
 }
 
 function authenticate(request) {
+  const sessionToken = readCookies(request)[sessionCookieName];
+  const session = sessionToken ? sessions.get(sessionToken) : null;
+  if (session && session.expiresAt > Date.now()) {
+    session.expiresAt = Date.now() + sessionDurationMs;
+    return { ok: true, user: session.user };
+  }
+  if (sessionToken) sessions.delete(sessionToken);
+
+  return authenticateBasic(request);
+}
+
+function authenticateBasic(request) {
   const ip = getClientIp(request);
   const blockedUntil = failedAuth.get(ip)?.blockedUntil ?? 0;
 
@@ -235,10 +267,7 @@ function authenticate(request) {
   }
 
   const header = request.headers.authorization ?? "";
-  if (!header.startsWith("Basic ")) {
-    registerFailedAttempt(ip);
-    return { ok: false, status: 401, error: "auth_required" };
-  }
+  if (!header.startsWith("Basic ")) return { ok: false, status: 401, error: "auth_required" };
 
   const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
   const separator = decoded.indexOf(":");
@@ -253,6 +282,62 @@ function authenticate(request) {
 
   failedAuth.delete(ip);
   return { ok: true, user };
+}
+
+async function login(request, response) {
+  const ip = getClientIp(request);
+  const blockedUntil = failedAuth.get(ip)?.blockedUntil ?? 0;
+  if (Date.now() < blockedUntil) {
+    sendJson(response, 429, { error: "too_many_attempts" });
+    return;
+  }
+
+  const body = await readJson(request);
+  const username = String(body.username ?? "");
+  const password = String(body.password ?? "");
+  const user = users.length
+    ? users.find((candidate) => candidate.username === username && candidate.password === password)
+    : process.env.NODE_ENV !== "production" && username === "dev" && password === "dev"
+      ? { username: "dev", role: "admin" }
+      : null;
+
+  if (!user) {
+    registerFailedAttempt(ip);
+    sendJson(response, 401, { error: "invalid_credentials" });
+    return;
+  }
+
+  failedAuth.delete(ip);
+  const token = randomBytes(32).toString("base64url");
+  sessions.set(token, { user, expiresAt: Date.now() + sessionDurationMs });
+  response.setHeader("Set-Cookie", serializeSessionCookie(request, token, sessionDurationMs));
+  sendJson(response, 200, { user: user.username, role: user.role });
+}
+
+function logout(request, response) {
+  const token = readCookies(request)[sessionCookieName];
+  if (token) sessions.delete(token);
+  response.setHeader("Set-Cookie", serializeSessionCookie(request, "", 0));
+  sendJson(response, 200, { ok: true });
+}
+
+function readCookies(request) {
+  return String(request.headers.cookie ?? "")
+    .split(";")
+    .reduce((cookies, part) => {
+      const separator = part.indexOf("=");
+      if (separator < 0) return cookies;
+      const key = part.slice(0, separator).trim();
+      const value = part.slice(separator + 1).trim();
+      if (key) cookies[key] = decodeURIComponent(value);
+      return cookies;
+    }, {});
+}
+
+function serializeSessionCookie(request, value, maxAgeMs) {
+  const forwardedProtocol = String(request.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
+  const secure = forwardedProtocol === "https" || request.socket.encrypted;
+  return `${sessionCookieName}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(maxAgeMs / 1000)}${secure ? "; Secure" : ""}`;
 }
 
 function registerFailedAttempt(ip) {
@@ -535,6 +620,31 @@ async function sendDashboard(response) {
   sendJson(response, 200, stats);
 }
 
+async function sendLibrary(requestUrl, response) {
+  const view = String(requestUrl.searchParams.get("view") ?? "recent");
+  const acceptedType = view === "photos" ? "image" : view === "videos" ? "video" : null;
+  const checksums = await readJsonStore(checksumsFileName, {});
+  const items = [];
+
+  await walkStorage("", async (relativePath, stat) => {
+    const mediaType = await detectMediaType(toStoragePath(relativePath), relativePath);
+    if (acceptedType && mediaType !== acceptedType) return;
+    items.push({
+      name: path.basename(relativePath),
+      path: relativePath,
+      type: "file",
+      mediaType,
+      size: stat.size,
+      modifiedAt: stat.mtime.toISOString(),
+      url: `/files/${encodePath(relativePath)}`,
+      checksum: checksums[relativePath] ?? null
+    });
+  });
+
+  items.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
+  sendJson(response, 200, { view, items: items.slice(0, view === "recent" ? 100 : 500) });
+}
+
 async function getDiskUsage(targetPath) {
   try {
     const { stdout } = await execFileAsync("df", ["-Pk", targetPath]);
@@ -671,12 +781,13 @@ function streamMultipartFiles(request, targetDir, relativePath) {
       const safeRelativeFilename = sanitizeRelativeFilePath(info.filename);
       const fileRelativePath = joinRelative(relativePath, safeRelativeFilename);
       const targetPath = toStoragePath(fileRelativePath);
+      const temporaryPath = path.join(path.dirname(targetPath), `.upload-${randomBytes(8).toString("hex")}`);
       const hash = createHash("sha256");
       let size = 0;
 
       const writeDone = (async () => {
         await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        const writeStream = createWriteStream(targetPath);
+        const writeStream = createWriteStream(temporaryPath);
 
         file.on("data", (chunk) => {
           size += chunk.length;
@@ -688,17 +799,23 @@ function streamMultipartFiles(request, targetDir, relativePath) {
           reject(new Error("Archivo demasiado grande"));
         });
 
-        await pipeline(file, writeStream);
-        const checksum = hash.digest("hex");
-        const stat = await fs.stat(targetPath);
-        await setChecksum(fileRelativePath, checksum);
-        saved.push({
-          name: path.basename(fileRelativePath),
-          path: fileRelativePath,
-          size: stat.size,
-          modifiedAt: stat.mtime.toISOString(),
-          checksum
-        });
+        try {
+          await pipeline(file, writeStream);
+          await fs.rename(temporaryPath, targetPath);
+          const checksum = hash.digest("hex");
+          const stat = await fs.stat(targetPath);
+          await setChecksum(fileRelativePath, checksum);
+          saved.push({
+            name: path.basename(fileRelativePath),
+            path: fileRelativePath,
+            size: stat.size,
+            modifiedAt: stat.mtime.toISOString(),
+            checksum
+          });
+        } catch (error) {
+          await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+          throw error;
+        }
       })();
 
       writes.push(writeDone);
@@ -761,24 +878,38 @@ async function writeJsonStore(name, value) {
 }
 
 async function setChecksum(relativePath, checksum) {
-  const checksums = await readJsonStore(checksumsFileName, {});
-  checksums[relativePath] = checksum;
-  await writeJsonStore(checksumsFileName, checksums);
+  await mutateChecksums((checksums) => {
+    checksums[relativePath] = checksum;
+  });
 }
 
 async function moveChecksum(source, target) {
-  const checksums = await readJsonStore(checksumsFileName, {});
-  if (checksums[source]) {
-    checksums[target] = checksums[source];
-    delete checksums[source];
-    await writeJsonStore(checksumsFileName, checksums);
-  }
+  await mutateChecksums((checksums) => {
+    for (const key of Object.keys(checksums)) {
+      if (key !== source && !key.startsWith(`${source}/`)) continue;
+      const suffix = key.slice(source.length);
+      checksums[`${target}${suffix}`] = checksums[key];
+      delete checksums[key];
+    }
+  });
 }
 
 async function removeChecksum(relativePath) {
-  const checksums = await readJsonStore(checksumsFileName, {});
-  delete checksums[relativePath];
-  await writeJsonStore(checksumsFileName, checksums);
+  await mutateChecksums((checksums) => {
+    for (const key of Object.keys(checksums)) {
+      if (key === relativePath || key.startsWith(`${relativePath}/`)) delete checksums[key];
+    }
+  });
+}
+
+function mutateChecksums(mutation) {
+  const operation = checksumMutationQueue.then(async () => {
+    const checksums = await readJsonStore(checksumsFileName, {});
+    mutation(checksums);
+    await writeJsonStore(checksumsFileName, checksums);
+  });
+  checksumMutationQueue = operation.catch(() => undefined);
+  return operation;
 }
 
 async function writeLog(auth, request, action, target, extra = {}) {

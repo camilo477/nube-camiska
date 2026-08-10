@@ -6,7 +6,7 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
 
 ## Funciones
 
-- Subida múltiple de archivos.
+- Subida múltiple desde PC o celular, con cola, progreso y errores por archivo.
 - Subida de carpetas completas desde PC.
 - Barra de progreso de subida.
 - Crear carpetas desde la web.
@@ -22,6 +22,8 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
   - `viewer`: solo ve y descarga.
 - Links compartibles temporales.
 - Dashboard básico de almacenamiento y tipos de archivo.
+- Pantalla de acceso propia con sesiones seguras y las mismas credenciales configuradas en el servidor.
+- Bibliotecas globales de archivos recientes, fotos y videos.
 - Logs diarios en `.logs/YYYY-MM-DD.log`.
 - Checksum SHA-256 para archivos subidos.
 - Bloqueo de IP tras varios intentos fallidos.
@@ -105,8 +107,11 @@ http://localhost:3002
 
 ## Notas importantes
 
-- La seguridad real está en Basic Auth del servidor. En producción el servidor
-  falla si no defines usuarios/clave.
+- La pantalla de acceso valida las credenciales en el servidor y crea una cookie
+  de sesión `HttpOnly`, `SameSite=Strict`, válida durante 14 días. En producción
+  el servidor falla si no defines usuarios/clave.
+- `CLOUD_USER`, `CLOUD_PASSWORD` y `CLOUD_USERS_JSON` siguen siendo la única
+  fuente de usuarios: el nuevo login no crea ni cambia contraseñas.
 - Usa una clave larga. Basic Auth es suficiente para uso privado, pero no uses
   claves simples si expones el dominio.
 - Si lo publicas, usa HTTPS con Cloudflare Tunnel y no abras puertos directos del
