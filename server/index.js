@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream, createWriteStream, promises as fs } from "node:fs";
+import { createReadStream, createWriteStream, readFileSync, renameSync, writeFileSync, promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -16,20 +16,21 @@ const publicDir = path.join(rootDir, "dist");
 const storageDir = path.resolve(process.env.CLOUD_STORAGE_DIR ?? path.join(rootDir, "data"));
 const port = Number(process.env.PORT ?? 8080);
 const maxFileBytes = Number(process.env.CLOUD_MAX_FILE_BYTES ?? process.env.CLOUD_MAX_UPLOAD_BYTES ?? 1024 * 1024 * 1024 * 8);
-const failWindowMs = Number(process.env.CLOUD_AUTH_WINDOW_MS ?? 10 * 60 * 1000);
-const blockMs = Number(process.env.CLOUD_AUTH_BLOCK_MS ?? 5 * 60 * 1000);
+const failWindowMs = Number(process.env.CLOUD_AUTH_WINDOW_MS ?? 15 * 60 * 1000);
+const blockMs = Number(process.env.CLOUD_AUTH_BLOCK_MS ?? 15 * 60 * 1000);
 const maxFailedAttempts = Number(process.env.CLOUD_AUTH_MAX_ATTEMPTS ?? 5);
+const securityApiToken = process.env.CLOUD_SECURITY_TOKEN ?? "";
+const securityFileName = ".security.json";
+const maxSecurityEvents = 200;
 const trashDirName = ".trash";
 const logsDirName = ".logs";
 const sharesFileName = ".shares.json";
 const checksumsFileName = ".checksums.json";
 
 const users = buildUsers();
-const failedAuth = new Map();
-const sessions = new Map();
 let checksumMutationQueue = Promise.resolve();
 const sessionCookieName = "camiska_session";
-const sessionDurationMs = 1000 * 60 * 60 * 24 * 14;
+const sessionDurationMs = Number(process.env.CLOUD_SESSION_DURATION_MS ?? 1000 * 60 * 60 * 24 * 7);
 
 const mimeTypes = {
   ".avif": "image/avif",
@@ -67,12 +68,20 @@ await fs.mkdir(storageDir, { recursive: true });
 await fs.mkdir(path.join(storageDir, trashDirName), { recursive: true });
 await fs.mkdir(path.join(storageDir, logsDirName), { recursive: true });
 
+if (runSecurityCommand()) process.exit();
+
 const server = http.createServer(async (request, response) => {
   try {
+    setSecurityHeaders(request, response);
     const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
     if (requestUrl.pathname.startsWith("/share/") && request.method === "GET") {
       await sendSharedFile(requestUrl, response);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/internal/security" && request.method === "GET") {
+      sendInternalSecurity(request, response);
       return;
     }
 
@@ -89,6 +98,11 @@ const server = http.createServer(async (request, response) => {
     const auth = authenticate(request);
     if (!auth.ok) {
       sendJson(response, auth.status, { error: auth.error });
+      return;
+    }
+
+    if (["POST", "PUT", "DELETE"].includes(request.method) && !sameOrigin(request)) {
+      sendJson(response, 403, { error: "origin_not_allowed" });
       return;
     }
 
@@ -245,50 +259,35 @@ function parseUsersJson() {
 
 function authenticate(request) {
   const sessionToken = readCookies(request)[sessionCookieName];
-  const session = sessionToken ? sessions.get(sessionToken) : null;
-  if (session && session.expiresAt > Date.now()) {
-    session.expiresAt = Date.now() + sessionDurationMs;
-    return { ok: true, user: session.user };
+  if (!sessionToken) return { ok: false, status: 401, error: "auth_required" };
+  const now = Date.now();
+  const state = cleanSecurityState(readSecurityState(), now);
+  const tokenHash = hashValue(sessionToken);
+  const session = state.sessions.find((item) => safeEqual(item.tokenHash, tokenHash));
+  if (!session) return { ok: false, status: 401, error: "auth_required" };
+  if (now - session.lastSeen > 60_000) {
+    session.lastSeen = now;
+    session.ip = getClientIp(request);
+    writeSecurityState(state);
   }
-  if (sessionToken) sessions.delete(sessionToken);
-
-  return authenticateBasic(request);
-}
-
-function authenticateBasic(request) {
-  const ip = getClientIp(request);
-  const blockedUntil = failedAuth.get(ip)?.blockedUntil ?? 0;
-
-  if (Date.now() < blockedUntil) {
-    return { ok: false, status: 429, error: "too_many_attempts" };
-  }
-
-  if (!users.length && process.env.NODE_ENV !== "production") {
-    return { ok: true, user: { username: "dev", role: "admin" } };
-  }
-
-  const header = request.headers.authorization ?? "";
-  if (!header.startsWith("Basic ")) return { ok: false, status: 401, error: "auth_required" };
-
-  const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
-  const separator = decoded.indexOf(":");
-  const username = decoded.slice(0, separator);
-  const password = decoded.slice(separator + 1);
-  const user = users.find((candidate) => candidate.username === username && candidate.password === password);
-
-  if (!user) {
-    registerFailedAttempt(ip);
-    return { ok: false, status: 401, error: "auth_required" };
-  }
-
-  failedAuth.delete(ip);
-  return { ok: true, user };
+  return {
+    ok: true,
+    user: { username: session.username, role: session.role },
+    session,
+    state
+  };
 }
 
 async function login(request, response) {
+  if (!sameOrigin(request)) {
+    sendJson(response, 403, { error: "origin_not_allowed" });
+    return;
+  }
   const ip = getClientIp(request);
-  const blockedUntil = failedAuth.get(ip)?.blockedUntil ?? 0;
-  if (Date.now() < blockedUntil) {
+  const now = Date.now();
+  const state = cleanSecurityState(readSecurityState(), now);
+  const attempt = state.attempts[ip];
+  if (attempt?.blockedUntil > now) {
     sendJson(response, 429, { error: "too_many_attempts" });
     return;
   }
@@ -297,27 +296,53 @@ async function login(request, response) {
   const username = String(body.username ?? "");
   const password = String(body.password ?? "");
   const user = users.length
-    ? users.find((candidate) => candidate.username === username && candidate.password === password)
+    ? users.find((candidate) => safeEqual(candidate.username, username) && safeEqual(candidate.password, password))
     : process.env.NODE_ENV !== "production" && username === "dev" && password === "dev"
       ? { username: "dev", role: "admin" }
       : null;
 
   if (!user) {
-    registerFailedAttempt(ip);
-    sendJson(response, 401, { error: "invalid_credentials" });
+    const blockedUntil = registerFailedAttempt(state, ip, request);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 400));
+    sendJson(response, blockedUntil ? 429 : 401, { error: blockedUntil ? "too_many_attempts" : "invalid_credentials" });
     return;
   }
 
-  failedAuth.delete(ip);
+  delete state.attempts[ip];
   const token = randomBytes(32).toString("base64url");
-  sessions.set(token, { user, expiresAt: Date.now() + sessionDurationMs });
+  const device = getDeviceName(request.headers["user-agent"]);
+  state.sessions.push({
+    id: randomUUID(),
+    tokenHash: hashValue(token),
+    username: user.username,
+    role: user.role,
+    device,
+    ip,
+    createdAt: now,
+    lastSeen: now,
+    expiresAt: now + sessionDurationMs
+  });
+  addSecurityEvent(state, { result: "success", username: user.username, ip, device });
+  writeSecurityState(state);
   response.setHeader("Set-Cookie", serializeSessionCookie(request, token, sessionDurationMs));
   sendJson(response, 200, { user: user.username, role: user.role });
 }
 
 function logout(request, response) {
   const token = readCookies(request)[sessionCookieName];
-  if (token) sessions.delete(token);
+  if (token) {
+    const state = cleanSecurityState(readSecurityState());
+    const tokenHash = hashValue(token);
+    const session = state.sessions.find((item) => safeEqual(item.tokenHash, tokenHash));
+    state.sessions = state.sessions.filter((item) => !safeEqual(item.tokenHash, tokenHash));
+    if (session) addSecurityEvent(state, {
+      result: "logout",
+      username: session.username,
+      ip: getClientIp(request),
+      device: getDeviceName(request.headers["user-agent"])
+    });
+    writeSecurityState(state);
+  }
   response.setHeader("Set-Cookie", serializeSessionCookie(request, "", 0));
   sendJson(response, 200, { ok: true });
 }
@@ -341,15 +366,151 @@ function serializeSessionCookie(request, value, maxAgeMs) {
   return `${sessionCookieName}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(maxAgeMs / 1000)}${secure ? "; Secure" : ""}`;
 }
 
-function registerFailedAttempt(ip) {
+function registerFailedAttempt(state, ip, request) {
   const now = Date.now();
-  const state = failedAuth.get(ip);
-  const attempts = state && now - state.firstAttemptAt < failWindowMs ? state.attempts + 1 : 1;
-  failedAuth.set(ip, {
+  const previous = state.attempts[ip];
+  const attempts = previous && now - previous.firstAttemptAt < failWindowMs ? previous.attempts + 1 : 1;
+  const blockedUntil = attempts >= maxFailedAttempts ? now + blockMs : 0;
+  state.attempts[ip] = {
     attempts,
-    firstAttemptAt: state && now - state.firstAttemptAt < failWindowMs ? state.firstAttemptAt : now,
-    blockedUntil: attempts >= maxFailedAttempts ? now + blockMs : 0
+    firstAttemptAt: previous && now - previous.firstAttemptAt < failWindowMs ? previous.firstAttemptAt : now,
+    lastAttempt: now,
+    blockedUntil
+  };
+  addSecurityEvent(state, {
+    result: blockedUntil ? "blocked" : "failure",
+    ip,
+    device: getDeviceName(request.headers["user-agent"])
   });
+  writeSecurityState(state);
+  return blockedUntil;
+}
+
+function readSecurityState() {
+  try {
+    return JSON.parse(readFileSync(path.join(storageDir, securityFileName), "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    return { sessions: [], attempts: {}, events: [] };
+  }
+}
+
+function writeSecurityState(state) {
+  const target = path.join(storageDir, securityFileName);
+  const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, target);
+}
+
+function cleanSecurityState(state, now = Date.now()) {
+  const clean = state && typeof state === "object" ? state : {};
+  clean.sessions = Array.isArray(clean.sessions) ? clean.sessions.filter((session) => Number(session.expiresAt) > now) : [];
+  clean.attempts = clean.attempts && typeof clean.attempts === "object" && !Array.isArray(clean.attempts) ? clean.attempts : {};
+  clean.events = Array.isArray(clean.events) ? clean.events.slice(-maxSecurityEvents) : [];
+  for (const [ip, attempt] of Object.entries(clean.attempts)) {
+    if (!attempt || now - Number(attempt.lastAttempt ?? 0) > failWindowMs) delete clean.attempts[ip];
+  }
+  return clean;
+}
+
+function addSecurityEvent(state, event) {
+  state.events.push({ id: randomUUID(), timestamp: Date.now(), ...event });
+  state.events = state.events.slice(-maxSecurityEvents);
+}
+
+function hashValue(value) {
+  return createHash("sha256").update(String(value)).digest("hex");
+}
+
+function safeEqual(left, right) {
+  const leftHash = Buffer.from(hashValue(left), "hex");
+  const rightHash = Buffer.from(hashValue(right), "hex");
+  return timingSafeEqual(leftHash, rightHash);
+}
+
+function sameOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  const protocol = String(request.headers["x-forwarded-proto"] ?? (request.socket.encrypted ? "https" : "http")).split(",")[0].trim();
+  const host = String(request.headers["x-forwarded-host"] ?? request.headers.host ?? "").split(",")[0].trim();
+  return origin === `${protocol}://${host}`;
+}
+
+function setSecurityHeaders(request, response) {
+  response.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; style-src 'self'; script-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'");
+  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "DENY");
+  if (String(request.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https") {
+    response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+}
+
+function getDeviceName(userAgent = "") {
+  let browser = "Navegador";
+  let system = "Dispositivo";
+  if (/Edg\//i.test(userAgent)) browser = "Edge";
+  else if (/Firefox\//i.test(userAgent)) browser = "Firefox";
+  else if (/CriOS\//i.test(userAgent) || /Chrome\//i.test(userAgent)) browser = "Chrome";
+  else if (/Safari\//i.test(userAgent)) browser = "Safari";
+  if (/iPhone/i.test(userAgent)) system = "iPhone";
+  else if (/iPad/i.test(userAgent)) system = "iPad";
+  else if (/Android/i.test(userAgent)) system = "Android";
+  else if (/Windows/i.test(userAgent)) system = "Windows";
+  else if (/Macintosh|Mac OS X/i.test(userAgent)) system = "Mac";
+  else if (/Linux/i.test(userAgent)) system = "Linux";
+  return `${browser} · ${system}`;
+}
+
+function sendInternalSecurity(request, response) {
+  const header = request.headers.authorization ?? "";
+  const suppliedToken = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!securityApiToken || !safeEqual(securityApiToken, suppliedToken)) {
+    sendJson(response, 404, { error: "not_found" });
+    return;
+  }
+  const state = cleanSecurityState(readSecurityState());
+  writeSecurityState(state);
+  sendJson(response, 200, {
+    sessions: state.sessions.map((session) => ({
+      id: session.id,
+      user: session.username,
+      role: session.role,
+      device: session.device,
+      ip: session.ip,
+      createdAt: session.createdAt,
+      lastSeen: session.lastSeen
+    })),
+    events: state.events.slice(-30).reverse()
+  });
+}
+
+function runSecurityCommand() {
+  const command = process.argv[2];
+  if (!command) return false;
+  const state = cleanSecurityState(readSecurityState());
+  if (command === "--unlock-all") {
+    state.attempts = {};
+    writeSecurityState(state);
+    console.log("Todos los bloqueos de Nube fueron eliminados.");
+    return true;
+  }
+  if (command === "--unlock-ip" && process.argv[3]) {
+    delete state.attempts[process.argv[3]];
+    writeSecurityState(state);
+    console.log(`Bloqueo eliminado para ${process.argv[3]}.`);
+    return true;
+  }
+  if (command === "--list-locks") {
+    console.table(Object.entries(state.attempts)
+      .filter(([, attempt]) => Number(attempt.blockedUntil) > Date.now())
+      .map(([ip, attempt]) => ({ ip, hasta: new Date(attempt.blockedUntil).toISOString() })));
+    return true;
+  }
+  console.error("Usa --list-locks, --unlock-all o --unlock-ip <IP>.");
+  process.exitCode = 1;
+  return true;
 }
 
 function requireAdmin(user) {

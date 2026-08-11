@@ -20,6 +20,9 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
 - Roles:
   - `admin`: sube, borra, renombra, mueve, comparte.
   - `viewer`: solo ve y descarga.
+- Sesión persistente independiente por dispositivo, válida durante siete días.
+- Bloqueo por IP durante 15 minutos después de cinco intentos fallidos.
+- Registro de las sesiones y de los 200 eventos de acceso más recientes.
 - Links compartibles temporales.
 - Dashboard básico de almacenamiento y tipos de archivo.
 - Pantalla de acceso propia con sesiones seguras y las mismas credenciales configuradas en el servidor.
@@ -81,9 +84,11 @@ docker run -d \
   -e CLOUD_PASSWORD="pon-una-clave-larga" \
   -e CLOUD_VIEWER_USER="visor" \
   -e CLOUD_VIEWER_PASSWORD="otra-clave-larga" \
+  -e CLOUD_SECURITY_TOKEN="token-interno-largo" \
   -e CLOUD_STORAGE_DIR="/data" \
   -v /ruta/del/disco/nube:/data \
-  nube-camiska
+  nube-camiska:latest
+```
 
 ## Notas rápidas
 
@@ -97,8 +102,6 @@ La forma más simple es crear archivos `.txt` dentro de tu carpeta de nube:
 4. Escribe el texto y guarda.
 
 Así tendrás una sección práctica de notas sincronizadas entre tus dispositivos sin cambiar el flujo actual de la app.
-```
-
 El reverse proxy o Cloudflare Tunnel puede apuntar el dominio privado a:
 
 ```text
@@ -107,8 +110,8 @@ http://localhost:3002
 
 ## Variables
 
-- `CLOUD_USER`: usuario de Basic Auth.
-- `CLOUD_PASSWORD`: clave de Basic Auth para admin.
+- `CLOUD_USER`: usuario administrador.
+- `CLOUD_PASSWORD`: contraseña del administrador.
 - `CLOUD_VIEWER_USER`: usuario opcional de solo lectura.
 - `CLOUD_VIEWER_PASSWORD`: clave opcional de solo lectura.
 - `CLOUD_USERS_JSON`: alternativa avanzada para definir varios usuarios.
@@ -116,18 +119,20 @@ http://localhost:3002
 - `CLOUD_STORAGE_DIR`: carpeta donde se guardan los archivos dentro del contenedor.
 - `CLOUD_MAX_FILE_BYTES`: límite por archivo. Por defecto son 8 GB.
 - `CLOUD_AUTH_MAX_ATTEMPTS`: intentos fallidos antes de bloquear IP. Por defecto `5`.
-- `CLOUD_AUTH_BLOCK_MS`: duración del bloqueo. Por defecto `300000`.
+- `CLOUD_AUTH_WINDOW_MS`: ventana de intentos. Por defecto `900000` (15 minutos).
+- `CLOUD_AUTH_BLOCK_MS`: duración del bloqueo. Por defecto `900000` (15 minutos).
+- `CLOUD_SESSION_DURATION_MS`: duración de sesión. Por defecto siete días.
+- `CLOUD_SECURITY_TOKEN`: secreto compartido con App Hub para consultar sesiones.
 - `PORT`: puerto interno del servidor. Por defecto `8080`.
 
 ## Notas importantes
 
 - La pantalla de acceso valida las credenciales en el servidor y crea una cookie
-  de sesión `HttpOnly`, `SameSite=Strict`, válida durante 14 días. En producción
+  de sesión `HttpOnly`, `SameSite=Strict`, válida durante siete días. En producción
   el servidor falla si no defines usuarios/clave.
 - `CLOUD_USER`, `CLOUD_PASSWORD` y `CLOUD_USERS_JSON` siguen siendo la única
   fuente de usuarios: el nuevo login no crea ni cambia contraseñas.
-- Usa una clave larga. Basic Auth es suficiente para uso privado, pero no uses
-  claves simples si expones el dominio.
+- Usa una clave larga y un valor distinto, largo y aleatorio para `CLOUD_SECURITY_TOKEN`.
 - Si lo publicas, usa HTTPS con Cloudflare Tunnel y no abras puertos directos del
   router.
 - Los archivos quedan directamente en el volumen montado.
@@ -137,3 +142,29 @@ http://localhost:3002
   arrastrar y soltar desde computador.
 - Backups automáticos a otro disco o servicios tipo Backblaze/S3 quedan como
   siguiente paso; esta versión deja la nube local lista y auditable.
+
+## Conectar las sesiones con App Hub
+
+Genera un token una sola vez:
+
+```bash
+openssl rand -hex 32
+```
+
+Usa el mismo valor como `CLOUD_SECURITY_TOKEN` en Nube y configura en App Hub:
+
+```env
+NUBE_SECURITY_URL=https://tu-dominio-nube/api/internal/security
+NUBE_SECURITY_TOKEN=el-mismo-token
+```
+
+La API interna no expone contraseñas y responde como una ruta inexistente si el
+token no coincide.
+
+## Desbloquear accesos
+
+```bash
+docker exec nube-camiska node server/index.js --list-locks
+docker exec nube-camiska node server/index.js --unlock-ip 192.0.2.10
+docker exec nube-camiska node server/index.js --unlock-all
+```
