@@ -1,5 +1,5 @@
-const SHELL_CACHE = "nube-camiska-shell-v1";
-const ASSET_CACHE = "nube-camiska-assets-v1";
+const SHELL_CACHE = "nube-camiska-shell-v3";
+const ASSET_CACHE = "nube-camiska-assets-v3";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -44,7 +44,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/files/") || url.pathname.startsWith("/share/")) {
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/files/") || url.pathname.startsWith("/share/") || url.pathname.startsWith("/room-file/")) {
     return;
   }
 

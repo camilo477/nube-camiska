@@ -7,13 +7,16 @@
     "dev": "vite --host 0.0.0.0",
     "dev:server": "node server/index.js",
     "build": "tsc && vite build",
+    "test": "node --test server/*.test.js",
     "start": "node server/index.js"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "typescript": "^5.9.3",
     "vite": "^8.2.1"
   },
   "dependencies": {
-    "busboy": "^1.6.0"
+    "busboy": "^1.6.0",
+    "qrcode": "^1.5.4"
   }
 }

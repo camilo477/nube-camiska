@@ -1,9 +1,11 @@
 import "./styles.css";
+import QRCode from "qrcode";
+import { openQuickRoom, type Room } from "./rooms";
 
 type Role = "admin" | "viewer";
 type MediaType = "folder" | "image" | "video" | "audio" | "document" | "other";
 type ViewMode = "grid" | "list";
-type Section = "files" | "recent" | "photos" | "videos" | "trash";
+type Section = "files" | "recent" | "photos" | "videos" | "rooms" | "trash";
 type SortKey = "name" | "date" | "size";
 type CloudItem = {
   name: string;
@@ -53,7 +55,9 @@ const icons: Record<string, string> = {
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   logout: '<path d="M10 4H5v16h5M14 8l4 4-4 4m4-4H9"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
-  eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>'
+  eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+  users: '<circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 4v2"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>'
 };
 
 const root = document.querySelector<HTMLDivElement>("#root");
@@ -77,6 +81,10 @@ let menuPath: string | null = null;
 let dialog: DialogState | null = null;
 let noteDraft: NoteDraft | null = null;
 let uploadTasks: UploadTask[] = [];
+let rooms: Room[] = [];
+let activeRoomToken: string | null = null;
+let roomCreateOpen = false;
+let roomAdminPoll = 0;
 let toastTimer = 0;
 let installPrompt: InstallPromptEvent | null = null;
 let serviceWorkerRefreshing = false;
@@ -87,6 +95,8 @@ setupPwa();
 void boot();
 
 async function boot() {
+  const publicToken = location.pathname.match(/^\/room\/([a-f0-9]{48})\/?$/)?.[1];
+  if (publicToken) return openQuickRoom(rootElement, publicToken);
   try {
     const response = await fetch("/api/me");
     if (!response.ok) return renderLogin();
@@ -128,6 +138,7 @@ function setupPwa() {
 
 async function registerServiceWorker() {
   try {
+    let hadController = Boolean(navigator.serviceWorker.controller);
     const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
     if (registration.waiting) showPwaUpdate(registration);
 
@@ -139,6 +150,9 @@ async function registerServiceWorker() {
     });
 
     navigator.serviceWorker.addEventListener("controllerchange", () => {
+      // A first installation can claim this page without reloading a live
+      // room (and abandoning its in-flight presence request).
+      if (!hadController) { hadController = true; return; }
       if (serviceWorkerRefreshing) return;
       serviceWorkerRefreshing = true;
       window.location.reload();
@@ -271,7 +285,7 @@ function renderApp(error = "") {
         <div class="sidebar-heading"><a class="brand" href="#">${icon("cloud", 27)}<span>Nube <b>Camiska</b></span></a><button class="close-mobile-menu" id="close-mobile-menu" type="button" aria-label="Cerrar menú">${icon("close", 21)}</button></div>
         ${role === "admin" ? `<button class="primary-button upload-main" id="pick-files">${icon("plus", 19)} Subir archivos</button><button class="folder-upload" id="pick-folder">${icon("folder", 16)} Subir una carpeta</button><input class="hidden-input" id="file-input" type="file" multiple><input class="hidden-input" id="folder-input" type="file" webkitdirectory multiple>` : ""}
         <nav class="side-nav" aria-label="Secciones">
-          ${navItem("files", "home", "Mis archivos")}${navItem("recent", "clock", "Recientes")}${navItem("photos", "image", "Fotos")}${navItem("videos", "video", "Videos")}<button class="nav-item ${section === "files" && currentPath === "Notas" ? "active" : ""}" id="open-notes">${icon("edit", 20)}<span>Notas</span></button>${role === "admin" ? `<span class="nav-separator"></span>${navItem("trash", "trash", "Papelera")}` : ""}
+          ${navItem("files", "home", "Mis archivos")}${navItem("recent", "clock", "Recientes")}${navItem("photos", "image", "Fotos")}${navItem("videos", "video", "Videos")}<button class="nav-item ${section === "files" && currentPath === "Notas" ? "active" : ""}" id="open-notes">${icon("edit", 20)}<span>Notas</span></button>${role === "admin" ? `${navItem("rooms", "users", "Sala rápida")}<span class="nav-separator"></span>${navItem("trash", "trash", "Papelera")}` : ""}
         </nav>
         <div class="sidebar-bottom">
           ${storageView()}
@@ -282,21 +296,23 @@ function renderApp(error = "") {
       <div class="main-area">
         <header class="topbar">
           <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menú">${icon("list", 21)}</button>
-          <label class="global-search">${icon("search", 19)}<input id="search" value="${escapeAttribute(query)}" placeholder="Buscar en esta vista…"></label>
-          <div class="top-actions"><button class="soft-button install-action" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>${icon("download", 17)}<span>Instalar</span></button>${role === "admin" ? `<button class="soft-button" id="new-note">${icon("edit", 17)}<span>Nueva nota</span></button><button class="soft-button" id="new-folder" ${section !== "files" ? "disabled" : ""}>${icon("folder", 17)}<span>Nueva carpeta</span></button>` : ""}<button class="avatar top-avatar" title="${escapeAttribute(user)}">${escapeHtml(user.slice(0, 1).toUpperCase())}</button></div>
+          <label class="global-search">${icon(section === "rooms" ? "users" : "search", 19)}<input id="search" value="${escapeAttribute(query)}" placeholder="${section === "rooms" ? "Tus salas temporales" : "Buscar en esta vista…"}" ${section === "rooms" ? "disabled" : ""}></label>
+          <div class="top-actions"><button class="soft-button install-action" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>${icon("download", 17)}<span>Instalar</span></button>${role === "admin" ? section === "rooms" ? `<button class="primary-button" id="new-room">${icon("plus", 17)}<span>Crear sala</span></button>` : `<button class="soft-button" id="new-note">${icon("edit", 17)}<span>Nueva nota</span></button><button class="soft-button" id="new-folder" ${section !== "files" ? "disabled" : ""}>${icon("folder", 17)}<span>Nueva carpeta</span></button>` : ""}<button class="avatar top-avatar" title="${escapeAttribute(user)}">${escapeHtml(user.slice(0, 1).toUpperCase())}</button></div>
         </header>
-        <main class="content">
+        <main class="content ${section === "rooms" ? "rooms-content" : ""}">
+          ${section === "rooms" ? `${error ? `<div class="error-banner">${escapeHtml(error)}</div>` : ""}${roomsContentMarkup()}` : `
           <div class="content-header">
             <div>${breadcrumbs()}<h1>${sectionTitle()}</h1><p>${sectionSubtitle()}</p></div>
             <div class="view-actions">${section === "trash" && role === "admin" && items.length ? `<button class="soft-button empty-trash" id="empty-trash">${icon("trash", 16)} Vaciar papelera</button>` : `<label class="sort-control">Ordenar por <select id="sort"><option value="name" ${sortKey === "name" ? "selected" : ""}>Nombre</option><option value="date" ${sortKey === "date" ? "selected" : ""}>Fecha</option><option value="size" ${sortKey === "size" ? "selected" : ""}>Tamaño</option></select></label><div class="segmented"><button data-view="grid" class="${viewMode === "grid" ? "active" : ""}" aria-label="Cuadrícula">${icon("grid", 18)}</button><button data-view="list" class="${viewMode === "list" ? "active" : ""}" aria-label="Lista">${icon("list", 18)}</button></div>`}</div>
           </div>
           ${error ? `<div class="error-banner">${escapeHtml(error)}</div>` : ""}
           ${selected.size ? selectionBarMarkup() : ""}<div id="content-items">${itemsMarkup()}</div>
+          `}
         </main>
       </div>
       ${role === "admin" ? `<div class="drop-overlay" id="drop-overlay">${icon("upload", 38)}<strong>Suelta tus archivos aquí</strong><span>Se guardarán en ${escapeHtml(currentPath || "Mis archivos")}</span></div>` : ""}
       <div id="upload-queue">${uploadQueueMarkup()}</div>
-      ${previewPath ? previewMarkup() : ""}${dialog ? dialogMarkup() : ""}${noteDraft ? noteEditorMarkup() : ""}
+      ${previewPath ? previewMarkup() : ""}${dialog ? dialogMarkup() : ""}${noteDraft ? noteEditorMarkup() : ""}${roomCreateOpen ? roomCreateMarkup() : ""}
       <div class="toast" id="toast" role="status"></div>
     </div>`;
   bindAppEvents();
@@ -414,9 +430,109 @@ function uploadQueueMarkup() {
   return `<section class="upload-queue"><header><div><b>${pending ? `Subiendo ${pending} archivo${pending === 1 ? "" : "s"}` : `${done} archivo${done === 1 ? "" : "s"} subido${done === 1 ? "" : "s"}`}</b><small>${pending ? "Puedes seguir usando tu nube" : uploadTasks.some(task => task.status === "error") ? "Algunos archivos no se pudieron subir" : "Todo está listo"}</small></div><button id="close-queue" ${pending ? "disabled" : ""}>${icon("close", 18)}</button></header><div class="queue-list">${uploadTasks.map(task => `<div class="queue-item"><span>${task.status === "done" ? icon("check", 15) : icon(iconForFile(task.file), 15)}</span><div><b>${escapeHtml(task.file.name)}</b><i><em style="width:${task.progress}%"></em></i></div><small>${task.status === "error" ? "Error" : task.status === "done" ? "Listo" : `${task.progress}%`}</small></div>`).join("")}</div></section>`;
 }
 
+function roomsContentMarkup() {
+  const active = rooms.find(room => room.token === activeRoomToken) ?? rooms[0] ?? null;
+  if (active && activeRoomToken !== active.token) activeRoomToken = active.token;
+  return `<div class="content-header rooms-heading"><div><span class="eyebrow">Intercambio temporal</span><h1>Sala rápida</h1><p>Comparte el QR para recibir y entregar archivos sin dar acceso a tu nube.</p></div><button class="primary-button rooms-create-inline" id="new-room-inline">${icon("plus", 17)} Crear sala</button></div>
+    ${!active ? `<div class="empty-state room-empty"><span>${icon("users", 34)}</span><h2>No hay salas activas</h2><p>Crea una sala, comparte su QR y empieza a intercambiar archivos.</p><button class="primary-button" id="empty-room-create">${icon("plus", 17)} Crear mi primera sala</button></div>` : `<div class="rooms-layout">
+      <aside class="rooms-list">${rooms.map(room => `<button class="room-list-item ${room.token === active.token ? "active" : ""}" data-room-token="${room.token}"><span>${icon("users", 18)}</span><span><b>${escapeHtml(room.name)}</b><small>${room.files.length} archivo${room.files.length === 1 ? "" : "s"} · ${room.participantCount} conectado${room.participantCount === 1 ? "" : "s"}</small></span><i class="${room.uploadsEnabled ? "open" : ""}"></i></button>`).join("")}</aside>
+      ${roomDetailMarkup(active)}
+    </div>`}`;
+}
+
+function roomDetailMarkup(room: Room) {
+  const url = `${location.origin}/room/${room.token}`;
+  const usedPercent = room.maxBytes ? Math.min(100, Math.round(room.totalBytes / room.maxBytes * 100)) : 0;
+  return `<section class="room-detail">
+    <header><div><span class="status-dot ${room.uploadsEnabled ? "open" : ""}"></span><span>${room.uploadsEnabled ? "Recibiendo archivos" : "Subidas pausadas"}</span><h2>${escapeHtml(room.name)}</h2><small>${room.expiresAt ? `Se cierra a las ${formatExpiry(room.expiresAt)} si no se conectan dos dispositivos` : "Abierta mientras haya dos dispositivos conectados"}</small></div><div class="room-actions"><button class="soft-button" id="toggle-room">${room.uploadsEnabled ? "Pausar subidas" : "Activar subidas"}</button><button class="danger-link" id="delete-room">Cerrar y eliminar</button></div></header>
+    <div class="room-share-panel"><div class="room-qr"><canvas id="room-qr" aria-label="Código QR de la sala"></canvas></div><div><span class="eyebrow">Invitación</span><h3>Escanea para entrar</h3><p>Cualquiera que tenga este enlace podrá compartir texto e imágenes mientras la sala esté activa.</p><div class="room-url"><input value="${escapeAttribute(url)}" readonly><button class="soft-button" id="copy-room-url">${icon("link", 16)} Copiar</button></div><a class="primary-button room-open-link" href="${url}">Entrar a la sala →</a></div></div>
+    <div class="room-files-heading"><div><h3>Archivos compartidos</h3><p>${formatBytes(room.totalBytes)} de ${formatBytes(room.maxBytes)} usados</p></div>${room.files.length ? `<button class="primary-button" id="save-room-files">${icon("download", 16)} Guardar todo en mi nube</button>` : ""}</div>
+    <progress class="room-capacity" max="100" value="${usedPercent}" aria-label="Capacidad usada de la sala"></progress>
+    ${room.files.length ? `<div class="room-files">${room.files.map(file => `<a href="${file.url}" target="_blank" rel="noopener"><span>${icon(file.mediaType === "image" ? "image" : file.mediaType === "video" ? "video" : "file", 20)}</span><span><b>${escapeHtml(file.name)}</b><small>${formatBytes(file.size)} · ${formatDate(file.modifiedAt)}</small></span>${icon("download", 17)}</a>`).join("")}</div>` : `<div class="room-files-empty">${icon("upload", 27)}<b>Aún no hay archivos</b><span>Cuando alguien suba algo, aparecerá aquí.</span></div>`}
+  </section>`;
+}
+
+function roomCreateMarkup() {
+  return `<div class="modal-backdrop"><form class="modal" id="room-create-form"><span class="modal-kicker">Nueva sala rápida</span><h2>Prepara el intercambio</h2><label>Nombre de la sala<input name="name" maxlength="80" required autofocus placeholder="Ej. Fotos de la reunión"></label><p>Comparte texto e imágenes mediante un enlace o QR. Si hay menos de dos dispositivos conectados durante 8 minutos, la sala se cierra y borra su contenido temporal.</p><div class="modal-actions"><button class="soft-button" id="cancel-room-create" type="button">Cancelar</button><button class="primary-button" type="submit">Crear y entrar</button></div></form></div>`;
+}
+
+async function loadRooms() {
+  const response = await fetch("/api/rooms");
+  if (response.status === 401) { authenticated = false; if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; } return renderLogin(); }
+  if (!response.ok) throw new Error("No pudimos cargar las salas.");
+  rooms = (await response.json() as { rooms: Room[] }).rooms;
+  if (!rooms.some(room => room.token === activeRoomToken)) activeRoomToken = rooms[0]?.token ?? null;
+  renderApp();
+  if (!roomAdminPoll) roomAdminPoll = window.setInterval(() => { if (section === "rooms" && !roomCreateOpen) void loadRooms().catch(() => showToast("No pudimos actualizar las salas", true)); }, 4000);
+}
+
+async function createRoom(event: Event) {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (button?.disabled) return;
+  if (button) button.disabled = true;
+  const data = new FormData(form);
+  try {
+    const response = await postJson("/api/rooms", { name: data.get("name") });
+    if (!response.ok) throw new Error("No se pudo crear la sala. Comprueba que tu sesión siga activa.");
+    const room = await response.json() as Room;
+    location.assign(`/room/${room.token}`);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "No se pudo crear la sala", true);
+    if (button) button.disabled = false;
+  }
+}
+
+async function updateActiveRoom() {
+  const room = rooms.find(candidate => candidate.token === activeRoomToken);
+  if (!room) return;
+  const response = await fetch(`/api/rooms/${room.token}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uploadsEnabled: !room.uploadsEnabled }) });
+  if (!response.ok) return showToast("No se pudo actualizar la sala", true);
+  await loadRooms();
+}
+
+async function saveActiveRoom() {
+  const room = rooms.find(candidate => candidate.token === activeRoomToken);
+  if (!room) return;
+  const response = await postJson(`/api/rooms/${room.token}/save`, {});
+  if (!response.ok) return showToast("No se pudieron guardar los archivos", true);
+  const data = await response.json() as { saved: string[] };
+  showToast(`${data.saved.length} archivo${data.saved.length === 1 ? " guardado" : "s guardados"} en tu nube`);
+}
+
+async function deleteActiveRoom() {
+  const room = rooms.find(candidate => candidate.token === activeRoomToken);
+  if (!room || !window.confirm(`¿Cerrar “${room.name}” y eliminar sus archivos temporales?`)) return;
+  const response = await fetch(`/api/rooms/${room.token}`, { method: "DELETE" });
+  if (!response.ok) return showToast("No se pudo eliminar la sala", true);
+  activeRoomToken = null;
+  await loadRooms();
+  showToast("Sala cerrada y archivos temporales eliminados");
+}
+
+function bindRoomEvents() {
+  document.querySelectorAll("#new-room,#new-room-inline,#empty-room-create").forEach(button => button.addEventListener("click", () => { roomCreateOpen = true; renderApp(); }));
+  document.querySelector("#cancel-room-create")?.addEventListener("click", () => { roomCreateOpen = false; renderApp(); });
+  document.querySelector("#room-create-form")?.addEventListener("submit", event => void createRoom(event));
+  document.querySelectorAll<HTMLElement>("[data-room-token]").forEach(button => button.addEventListener("click", () => { activeRoomToken = button.dataset.roomToken ?? null; renderApp(); }));
+  const failed = () => showToast("No pudimos completar la acción. Comprueba tu conexión.", true);
+  document.querySelector("#toggle-room")?.addEventListener("click", () => void updateActiveRoom().catch(failed));
+  document.querySelector("#save-room-files")?.addEventListener("click", () => void saveActiveRoom().catch(failed));
+  document.querySelector("#delete-room")?.addEventListener("click", () => void deleteActiveRoom().catch(failed));
+  document.querySelector("#copy-room-url")?.addEventListener("click", () => {
+    const room = rooms.find(candidate => candidate.token === activeRoomToken);
+    if (!navigator.clipboard) return showToast("Selecciona el enlace para copiarlo.", true);
+    if (room) void navigator.clipboard.writeText(`${location.origin}/room/${room.token}`).then(() => showToast("Enlace copiado")).catch(failed);
+  });
+  const canvas = document.querySelector<HTMLCanvasElement>("#room-qr");
+  const room = rooms.find(candidate => candidate.token === activeRoomToken);
+  if (canvas && room) void QRCode.toCanvas(canvas, `${location.origin}/room/${room.token}`, { width: 196, margin: 1, color: { dark: "#1e1f20", light: "#ffffff" } }).catch(failed);
+}
+
 function bindAppEvents() {
   document.querySelectorAll<HTMLElement>("[data-section]").forEach(button => button.addEventListener("click", () => { toggleMobileSidebar(false); section = button.dataset.section as Section; currentPath = ""; query = ""; selected.clear(); void loadSection(); }));
-  document.querySelector("#logout")?.addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); authenticated = false; renderLogin(); });
+  document.querySelector("#logout")?.addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); authenticated = false; if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; } renderLogin(); });
   document.querySelector("#mobile-menu")?.addEventListener("click", () => toggleMobileSidebar(true));
   document.querySelector("#close-mobile-menu")?.addEventListener("click", () => toggleMobileSidebar(false));
   document.querySelector("#sidebar-scrim")?.addEventListener("click", () => toggleMobileSidebar(false));
@@ -441,6 +557,7 @@ function bindAppEvents() {
   document.querySelector("#note-form")?.addEventListener("submit", event => void submitNote(event));
   document.querySelectorAll("#close-note,#cancel-note").forEach(button => button.addEventListener("click", () => { noteDraft = null; renderApp(); }));
   document.querySelector("#close-queue")?.addEventListener("click", () => { uploadTasks = []; renderApp(); });
+  bindRoomEvents();
 }
 
 function toggleMobileSidebar(open: boolean) {
@@ -503,9 +620,11 @@ function openItem(path: string) {
 
 async function loadSection() {
   try {
+    if (section === "rooms") return await loadRooms();
+    if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; }
     const url = section === "files" ? `/api/files?path=${encodeURIComponent(currentPath)}` : section === "trash" ? "/api/trash" : `/api/library?view=${section}`;
     const response = await fetch(url);
-    if (response.status === 401) { authenticated = false; return renderLogin(); }
+    if (response.status === 401) { authenticated = false; if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; } return renderLogin(); }
     if (!response.ok) throw new Error("No pudimos cargar esta vista.");
     const data = await response.json() as { path?: string; parent?: string | null; items: CloudItem[] };
     items = section === "trash" ? data.items.map(item => ({ ...item, name: item.name.replace(/^\d+-/, ""), path: item.name, mediaType: item.mediaType ?? "other", url: null, checksum: null })) : data.items;
@@ -629,6 +748,7 @@ function icon(name: string, size = 20) { return `<svg width="${size}" height="${
 function fileExtension(name: string) { const value = name.includes(".") ? name.split(".").pop()!.slice(0, 5).toUpperCase() : ""; return escapeHtml(value); }
 function formatBytes(bytes: number) { const units = ["B", "KB", "MB", "GB", "TB"]; let size = bytes; let unit = 0; while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; } return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`; }
 function formatDate(value: string) { return new Intl.DateTimeFormat("es-CO", { day: "numeric", month: "short", year: new Date(value).getFullYear() === new Date().getFullYear() ? undefined : "numeric" }).format(new Date(value)); }
+function formatExpiry(value: string) { return new Intl.DateTimeFormat("es-CO", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value)); }
 function escapeHtml(value: string) { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;"); }
 function escapeAttribute(value: string) { return escapeHtml(value); }
 

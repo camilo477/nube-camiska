@@ -1,12 +1,12 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream, createWriteStream, readFileSync, renameSync, writeFileSync, promises as fs } from "node:fs";
+import { constants as fsConstants, createReadStream, readFileSync, renameSync, writeFileSync, promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import Busboy from "busboy";
+import { reconcilePresence, updatePresence } from "./room-presence.js";
+import { receiveMultipart, writeUnique } from "./uploads.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,9 +26,17 @@ const trashDirName = ".trash";
 const logsDirName = ".logs";
 const sharesFileName = ".shares.json";
 const checksumsFileName = ".checksums.json";
+const roomsFileName = ".rooms.json";
+const roomsDirName = ".rooms";
+const maxRoomBytes = Number(process.env.CLOUD_ROOM_MAX_BYTES ?? 1024 * 1024 * 1024 * 2);
 
 const users = buildUsers();
 let checksumMutationQueue = Promise.resolve();
+let roomMutationQueue = Promise.resolve();
+const guestUploadAttempts = new Map();
+const roomFileQueues = new Map();
+const roomTextMaxBytes = 64 * 1024;
+const roomImageExtensions = new Set([".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jfif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const sessionCookieName = "camiska_session";
 const sessionDurationMs = Number(process.env.CLOUD_SESSION_DURATION_MS ?? 1000 * 60 * 60 * 24 * 7);
 
@@ -67,6 +75,7 @@ if (process.env.NODE_ENV === "production" && users.length === 0) {
 await fs.mkdir(storageDir, { recursive: true });
 await fs.mkdir(path.join(storageDir, trashDirName), { recursive: true });
 await fs.mkdir(path.join(storageDir, logsDirName), { recursive: true });
+await fs.mkdir(path.join(storageDir, roomsDirName), { recursive: true });
 
 if (runSecurityCommand()) process.exit();
 
@@ -82,6 +91,24 @@ const server = http.createServer(async (request, response) => {
 
     if (requestUrl.pathname === "/api/internal/security" && request.method === "GET") {
       sendInternalSecurity(request, response);
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith("/room-file/") && (request.method === "GET" || request.method === "HEAD")) {
+      await sendRoomFile(request, requestUrl, response);
+      return;
+    }
+
+    const publicRoomRoute = requestUrl.pathname.match(/^\/api\/rooms\/public\/([a-f0-9]{48})(?:\/(presence|upload|text))?$/);
+    if (publicRoomRoute) {
+      response.setHeader("Cache-Control", "no-store");
+      const action = publicRoomRoute[2];
+      if (request.method === "POST" && !sameOrigin(request)) return sendJson(response, 403, { error: "origin_not_allowed" });
+      if (!action && request.method === "GET") await sendPublicRoom(request, requestUrl, response);
+      else if (action === "presence" && request.method === "POST") await receiveRoomPresence(request, requestUrl, response);
+      else if (action === "upload" && request.method === "POST") await receiveRoomUpload(request, requestUrl, response);
+      else if (action === "text" && request.method === "POST") await receiveRoomText(request, requestUrl, response);
+      else sendJson(response, 405, { error: "method_not_allowed" });
       return;
     }
 
@@ -101,7 +128,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    if (["POST", "PUT", "DELETE"].includes(request.method) && !sameOrigin(request)) {
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && !sameOrigin(request)) {
       sendJson(response, 403, { error: "origin_not_allowed" });
       return;
     }
@@ -183,6 +210,36 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/rooms" && request.method === "GET") {
+      requireAdmin(auth.user);
+      await sendRooms(response, auth);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/rooms" && request.method === "POST") {
+      requireAdmin(auth.user);
+      await createRoom(request, response, auth);
+      return;
+    }
+
+    if (/^\/api\/rooms\/[^/]+$/.test(requestUrl.pathname) && request.method === "PATCH") {
+      requireAdmin(auth.user);
+      await updateRoom(request, requestUrl, response, auth);
+      return;
+    }
+
+    if (/^\/api\/rooms\/[^/]+$/.test(requestUrl.pathname) && request.method === "DELETE") {
+      requireAdmin(auth.user);
+      await deleteRoom(request, requestUrl, response, auth);
+      return;
+    }
+
+    if (/^\/api\/rooms\/[^/]+\/save$/.test(requestUrl.pathname) && request.method === "POST") {
+      requireAdmin(auth.user);
+      await saveRoomFiles(request, requestUrl, response, auth);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/trash" && request.method === "GET") {
       await sendTrash(response);
       return;
@@ -214,9 +271,12 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`Nube Camiska escuchando en http://0.0.0.0:${port}`);
+  console.log(`Nube Camiska escuchando en http://0.0.0.0:${server.address().port}`);
   console.log(`Guardando archivos en ${storageDir}`);
 });
+
+// Cleanup runs even when every browser has left the room.
+setInterval(() => { void removeExpiredRooms().catch(console.error); }, 1000).unref();
 
 function buildUsers() {
   const parsed = parseUsersJson();
@@ -716,6 +776,271 @@ async function createShare(request, response, auth) {
   sendJson(response, 201, { url: `/share/${token}`, expiresAt: shares[token].expiresAt });
 }
 
+async function sendRooms(response, auth) {
+  await removeExpiredRooms();
+  const rooms = await readJsonStore(roomsFileName, {});
+  const result = await Promise.all(Object.values(rooms).filter(room => room.owner === auth.user.username).map(room => roomSummary(room, auth)));
+  result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  response.setHeader("Cache-Control", "no-store");
+  sendJson(response, 200, { rooms: result });
+}
+
+async function createRoom(request, response, auth) {
+  const body = await readJson(request, 4096);
+  const name = sanitizeName(String(body.name || "Sala rápida").slice(0, 80));
+  const token = randomBytes(24).toString("hex");
+  const room = { token, name, owner: auth.user.username, createdAt: new Date().toISOString(), idleSince: Date.now(), connections: {}, uploadsEnabled: true };
+  await fs.mkdir(roomStoragePath(token), { recursive: true });
+  await mutateRooms(rooms => { rooms[token] = room; });
+  await writeLog(auth, request, "room_create", name, { token });
+  sendJson(response, 201, await roomSummary(room, auth));
+}
+
+function canSaveRoom(room, auth) {
+  return Boolean(auth?.ok && auth.user.role === "admin" && auth.user.username === room.owner);
+}
+
+function requireRoomOwner(room, auth) {
+  if (!canSaveRoom(room, auth)) throw Object.assign(new Error("forbidden"), { statusCode: 403 });
+}
+
+async function updateRoom(request, requestUrl, response, auth) {
+  const token = roomTokenFromPath(requestUrl.pathname);
+  const body = await readJson(request, 4096);
+  const updated = await getActiveRoom(token, room => {
+    requireRoomOwner(room, auth);
+    if (typeof body.uploadsEnabled === "boolean") room.uploadsEnabled = body.uploadsEnabled;
+  });
+  if (!updated) return sendJson(response, 404, { error: "room_not_found" });
+  await writeLog(auth, request, "room_update", updated.name, { token, uploadsEnabled: updated.uploadsEnabled });
+  sendJson(response, 200, await roomSummary(updated, auth));
+}
+
+async function deleteRoom(request, requestUrl, response, auth) {
+  const token = roomTokenFromPath(requestUrl.pathname);
+  let removed;
+  await mutateRooms(rooms => {
+    if (!rooms[token]) return;
+    requireRoomOwner(rooms[token], auth);
+    removed = rooms[token];
+    delete rooms[token];
+  });
+  if (!removed) return sendJson(response, 404, { error: "room_not_found" });
+  await deleteRoomStorage(token);
+  await writeLog(auth, request, "room_delete", removed.name, { token });
+  sendJson(response, 200, { ok: true });
+}
+
+async function saveRoomFiles(request, requestUrl, response, auth) {
+  const token = roomTokenFromPath(requestUrl.pathname);
+  const body = await readJson(request, 64 * 1024);
+  await withRoomFiles(token, async () => {
+    const room = await getActiveRoom(token);
+    if (!room) return sendJson(response, 404, { error: "room_not_found" });
+    requireRoomOwner(room, auth);
+    const requested = Array.isArray(body.files) ? new Set(body.files.map(String)) : null;
+    const destination = joinRelative("Salas rápidas", room.name);
+    const entries = await fs.readdir(roomStoragePath(token), { withFileTypes: true });
+    const saved = [];
+    await fs.mkdir(toStoragePath(destination), { recursive: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || entry.name.startsWith(".") || (requested && !requested.has(entry.name))) continue;
+      const source = path.join(roomStoragePath(token), entry.name);
+      const target = await writeUnique(joinRelative(destination, entry.name), toStoragePath, target => fs.copyFile(source, target, fsConstants.COPYFILE_EXCL));
+      const checksum = await checksumFile(toStoragePath(target));
+      await setChecksum(target, checksum);
+      saved.push(target);
+      await writeLog(auth, request, "room_save", entry.name, { token, target, checksum });
+    }
+    sendJson(response, 201, { saved, destination });
+  });
+}
+
+async function sendPublicRoom(request, requestUrl, response) {
+  const room = await getActiveRoom(roomTokenFromPath(requestUrl.pathname));
+  if (!room) return sendJson(response, 404, { error: "room_not_found" });
+  sendJson(response, 200, await roomSummary(room, authenticate(request)));
+}
+
+async function receiveRoomPresence(request, requestUrl, response) {
+  const body = await readJson(request, 4096);
+  if (![body.participantId, body.connectionId].every(id => typeof id === "string" && /^[a-f0-9-]{32,36}$/.test(id))) {
+    return sendJson(response, 400, { error: "invalid_participant" });
+  }
+  if (body.sequence !== undefined && (!Number.isSafeInteger(body.sequence) || body.sequence < 1)) return sendJson(response, 400, { error: "invalid_sequence" });
+  const room = await getActiveRoom(roomTokenFromPath(requestUrl.pathname), room => {
+    if (body.present !== false && !room.connections[body.connectionId] && Object.keys(room.connections).length >= 100) {
+      throw Object.assign(new Error("room_full"), { statusCode: 429 });
+    }
+    updatePresence(room, body);
+  });
+  if (!room) return sendJson(response, 404, { error: "room_not_found" });
+  sendJson(response, 200, await roomSummary(room, authenticate(request)));
+}
+
+async function writableRoom(token) {
+  const room = await getActiveRoom(token);
+  if (!room) throw Object.assign(new Error("room_not_found"), { statusCode: 404 });
+  if (!room.uploadsEnabled) throw Object.assign(new Error("uploads_disabled"), { statusCode: 403 });
+  return room;
+}
+
+async function receiveRoomText(request, requestUrl, response) {
+  const token = roomTokenFromPath(requestUrl.pathname);
+  const body = await readJson(request, roomTextMaxBytes * 6 + 1024);
+  if (typeof body.text !== "string" || !body.text.trim()) return sendJson(response, 400, { error: "text_required" });
+  const bytes = Buffer.byteLength(body.text);
+  if (bytes > roomTextMaxBytes) return sendJson(response, 413, { error: "text_too_large" });
+  await withRoomFiles(token, async () => {
+    const room = await writableRoom(token);
+    if (!allowGuestUpload(getClientIp(request), token)) return sendJson(response, 429, { error: "too_many_uploads" });
+    const summary = await roomSummary(room);
+    if (summary.totalBytes + bytes > maxRoomBytes) return sendJson(response, 413, { error: "room_quota_exceeded" });
+    const name = `texto-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(4).toString("hex")}.txt`;
+    await fs.writeFile(path.join(roomStoragePath(token), name), body.text, { flag: "wx" });
+    await writeLog({ user: { username: "invitado", role: "guest" } }, request, "room_text", name, { token, size: bytes });
+    sendJson(response, 201, { name });
+  });
+}
+
+async function receiveRoomUpload(request, requestUrl, response) {
+  const token = roomTokenFromPath(requestUrl.pathname);
+  if (!request.headers["content-type"]?.includes("multipart/form-data")) return sendJson(response, 400, { error: "multipart_required" });
+  await withRoomFiles(token, async () => {
+    const room = await writableRoom(token);
+    if (!allowGuestUpload(getClientIp(request), token)) return sendJson(response, 429, { error: "too_many_uploads" });
+    const summary = await roomSummary(room);
+    const saved = await streamMultipartFiles(request, roomStoragePath(token), joinRelative(roomsDirName, token), {
+      uniqueNames: true,
+      flatNames: true,
+      trackChecksum: false,
+      maxFiles: 20,
+      accept: name => roomImageExtensions.has(path.extname(name).toLowerCase()),
+      maximumCombinedBytes: Math.max(0, maxRoomBytes - summary.totalBytes),
+      beforeCommit: () => writableRoom(token)
+    });
+    if (!saved.length) return sendJson(response, 400, { error: "file_required" });
+    for (const item of saved) {
+      await writeLog({ user: { username: "invitado", role: "guest" } }, request, "room_upload", item.name, { token, size: item.size, checksum: item.checksum });
+    }
+    sendJson(response, 201, { saved: saved.map(({ name, size }) => ({ name, size })) });
+  });
+}
+
+async function sendRoomFile(request, requestUrl, response) {
+  const match = requestUrl.pathname.match(/^\/room-file\/([a-f0-9]{48})\/([^/]+)$/);
+  if (!match) return sendJson(response, 404, { error: "not_found" });
+  const [, token, encodedName] = match;
+  const filename = decodeURIComponent(encodedName);
+  const room = await getActiveRoom(token);
+  if (!room || filename.startsWith(".") || filename !== path.basename(filename) || filename.includes("\\")) return sendJson(response, 404, { error: "not_found" });
+  await streamAbsoluteFile(path.join(roomStoragePath(token), filename), request, response, { untrusted: true, download: requestUrl.searchParams.has("download") });
+}
+
+async function roomSummary(room, auth) {
+  const files = [];
+  let entries = [];
+  try { entries = await fs.readdir(roomStoragePath(room.token), { withFileTypes: true }); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  let totalBytes = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.startsWith(".")) continue;
+    const absolutePath = path.join(roomStoragePath(room.token), entry.name);
+    try {
+      const stat = await fs.stat(absolutePath);
+      totalBytes += stat.size;
+      const text = entry.name.endsWith(".txt") && stat.size <= roomTextMaxBytes ? await fs.readFile(absolutePath, "utf8") : undefined;
+      files.push({ name: entry.name, size: stat.size, modifiedAt: stat.mtime.toISOString(), mediaType: await detectMediaType(absolutePath, entry.name), text, url: `/room-file/${room.token}/${encodeURIComponent(entry.name)}` });
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  files.sort((a, b) => a.modifiedAt.localeCompare(b.modifiedAt) || a.name.localeCompare(b.name));
+  const { participantCount, expiresAt } = reconcilePresence(room);
+  // Explicit public fields: never serialize the owner, sessions, connections,
+  // storage paths, or other rooms into a guest response.
+  return { token: room.token, name: room.name, createdAt: room.createdAt, uploadsEnabled: room.uploadsEnabled, participantCount, expiresAt, serverTime: Date.now(), canSave: canSaveRoom(room, auth), files, totalBytes, maxBytes: maxRoomBytes };
+}
+
+async function getActiveRoom(token, mutation) {
+  if (!/^[a-f0-9]{48}$/.test(token)) return null;
+  let result = null;
+  let expired = false;
+  await mutateRooms(rooms => {
+    const room = rooms[token];
+    if (!room) return;
+    if (reconcilePresence(room).expired) {
+      delete rooms[token];
+      expired = true;
+      return;
+    }
+    mutation?.(room);
+    result = structuredClone(room);
+  });
+  if (expired) void deleteRoomStorage(token).catch(console.error);
+  return result;
+}
+
+async function removeExpiredRooms() {
+  const expired = [];
+  await mutateRooms(rooms => {
+    for (const [token, room] of Object.entries(rooms)) {
+      if (reconcilePresence(room).expired) { expired.push(token); delete rooms[token]; }
+    }
+  });
+  await Promise.all(expired.map(deleteRoomStorage));
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [key, attempts] of guestUploadAttempts) {
+    if (attempts.at(-1) <= cutoff) guestUploadAttempts.delete(key);
+  }
+}
+
+function deleteRoomStorage(token) {
+  return withRoomFiles(token, () => fs.rm(roomStoragePath(token), { recursive: true, force: true }));
+}
+
+function withRoomFiles(token, operation) {
+  const result = (roomFileQueues.get(token) ?? Promise.resolve()).then(operation);
+  const tail = result.catch(() => undefined);
+  roomFileQueues.set(token, tail);
+  void tail.then(() => { if (roomFileQueues.get(token) === tail) roomFileQueues.delete(token); });
+  return result;
+}
+
+function mutateRooms(mutation) {
+  const operation = roomMutationQueue.then(async () => {
+    const rooms = await readJsonStore(roomsFileName, {});
+    const before = JSON.stringify(rooms);
+    mutation(rooms);
+    if (JSON.stringify(rooms) !== before) await writeJsonStore(roomsFileName, rooms);
+  });
+  roomMutationQueue = operation.catch(() => undefined);
+  return operation;
+}
+
+function roomTokenFromPath(pathname) {
+  return pathname.split("/").find(part => /^[a-f0-9]{48}$/.test(part)) ?? "";
+}
+
+function roomStoragePath(token) {
+  if (!/^[a-f0-9]{48}$/.test(token)) throw Object.assign(new Error("room_not_found"), { statusCode: 404 });
+  return path.join(storageDir, roomsDirName, token);
+}
+
+function allowGuestUpload(ip, token) {
+  const key = `${ip}:${token}`;
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  const recent = (guestUploadAttempts.get(key) ?? []).filter(at => at > cutoff);
+  if (recent.length >= 120) return false;
+  recent.push(Date.now());
+  guestUploadAttempts.set(key, recent);
+  return true;
+}
+
+async function checksumFile(absolutePath) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(absolutePath)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
 async function trashEntry(request, requestUrl, response, auth) {
   const relativePath = normalizeRelativePath(requestUrl.searchParams.get("path") ?? "");
   if (!relativePath) {
@@ -854,8 +1179,13 @@ async function sendSharedFile(requestUrl, response) {
 }
 
 async function streamStoredFile(relativePath, request, response) {
-  const absolutePath = toStoragePath(relativePath);
-  const stat = await fs.stat(absolutePath);
+  await streamAbsoluteFile(toStoragePath(relativePath), request, response);
+}
+
+async function streamAbsoluteFile(absolutePath, request, response, options = {}) {
+  let stat;
+  try { stat = await fs.stat(absolutePath); }
+  catch { return sendJson(response, 404, { error: "not_found" }); }
 
   if (!stat.isFile()) {
     sendJson(response, 404, { error: "not_found" });
@@ -867,8 +1197,15 @@ async function streamStoredFile(relativePath, request, response) {
   const commonHeaders = {
     "Accept-Ranges": "bytes",
     "Content-Type": contentType,
-    "Content-Disposition": `inline; filename="${encodeHeaderFilename(path.basename(absolutePath))}"`
+    "Content-Disposition": contentDisposition(options.download || options.untrusted && (contentType.includes("html") || contentType.includes("svg")) ? "attachment" : "inline", path.basename(absolutePath)),
+    ...(options.untrusted ? { "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store" } : {})
   };
+
+  if (request?.method === "HEAD") {
+    response.writeHead(200, { ...commonHeaders, "Content-Length": stat.size });
+    response.end();
+    return;
+  }
 
   if (range) {
     const match = range.match(/bytes=(\d*)-(\d*)/);
@@ -928,79 +1265,26 @@ async function sendStatic(requestUrl, response) {
   createReadStream(staticPath).pipe(response);
 }
 
-function streamMultipartFiles(request, targetDir, relativePath) {
-  return new Promise((resolve, reject) => {
-    const busboy = Busboy({
-      headers: request.headers,
-      preservePath: true,
-      limits: {
-        fileSize: maxFileBytes
-      }
-    });
-    const saved = [];
-    const writes = [];
-
-    busboy.on("file", (_fieldName, file, info) => {
-      const safeRelativeFilename = sanitizeRelativeFilePath(info.filename);
-      const fileRelativePath = joinRelative(relativePath, safeRelativeFilename);
-      const targetPath = toStoragePath(fileRelativePath);
-      const temporaryPath = path.join(path.dirname(targetPath), `.upload-${randomBytes(8).toString("hex")}`);
-      const hash = createHash("sha256");
-      let size = 0;
-
-      const writeDone = (async () => {
-        await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        const writeStream = createWriteStream(temporaryPath);
-
-        file.on("data", (chunk) => {
-          size += chunk.length;
-          hash.update(chunk);
-        });
-
-        file.on("limit", () => {
-          writeStream.destroy();
-          reject(new Error("Archivo demasiado grande"));
-        });
-
-        try {
-          await pipeline(file, writeStream);
-          await fs.rename(temporaryPath, targetPath);
-          const checksum = hash.digest("hex");
-          const stat = await fs.stat(targetPath);
-          await setChecksum(fileRelativePath, checksum);
-          saved.push({
-            name: path.basename(fileRelativePath),
-            path: fileRelativePath,
-            size: stat.size,
-            modifiedAt: stat.mtime.toISOString(),
-            checksum
-          });
-        } catch (error) {
-          await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
-          throw error;
-        }
-      })();
-
-      writes.push(writeDone);
-    });
-
-    busboy.on("finish", async () => {
-      try {
-        await Promise.all(writes);
-        resolve(saved);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    busboy.on("error", reject);
-    request.on("error", reject);
-    request.pipe(busboy);
+async function streamMultipartFiles(request, targetDir, relativePath, options = {}) {
+  const saved = await receiveMultipart(request, targetDir, {
+    ...options,
+    maxFileBytes,
+    sanitizeFilename: filename => options.flatNames ? sanitizeName(path.basename(filename)) : sanitizeRelativeFilePath(filename),
+    resolvePath: name => toStoragePath(joinRelative(relativePath, name))
   });
+  for (const item of saved) {
+    item.path = joinRelative(relativePath, item.path);
+    if (options.trackChecksum !== false) await setChecksum(item.path, item.checksum);
+  }
+  return saved;
 }
 
-async function readJson(request) {
+async function readJson(request, limit = Infinity) {
   const chunks = [];
+  let bytes = 0;
   for await (const chunk of request) {
+    bytes += chunk.length;
+    if (bytes > limit) throw Object.assign(new Error("body_too_large"), { statusCode: 413 });
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -1037,7 +1321,12 @@ async function readJsonStore(name, fallback) {
 }
 
 async function writeJsonStore(name, value) {
-  await fs.writeFile(path.join(storageDir, name), `${JSON.stringify(value, null, 2)}\n`);
+  const target = path.join(storageDir, name);
+  const temporary = `${target}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+    await fs.rename(temporary, target);
+  } finally { await fs.rm(temporary, { force: true }); }
 }
 
 async function setChecksum(relativePath, checksum) {
@@ -1231,7 +1520,11 @@ function encodePath(relativePath) {
 }
 
 function encodeHeaderFilename(filename) {
-  return filename.replace(/["\\]/g, "_");
+  return filename.replace(/[^\x20-\x7E]|["\\]/g, "_");
+}
+
+function contentDisposition(disposition, filename) {
+  return `${disposition}; filename="${encodeHeaderFilename(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 function sendJson(response, status, payload) {

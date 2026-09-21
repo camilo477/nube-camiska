@@ -24,6 +24,8 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
 - Bloqueo por IP durante 15 minutos después de cinco intentos fallidos.
 - Registro de las sesiones y de los 200 eventos de acceso más recientes.
 - Links compartibles temporales.
+- Salas rápidas temporales con QR para intercambiar archivos con invitados sin
+  darles acceso al resto de la nube.
 - Dashboard básico de almacenamiento y tipos de archivo.
 - Pantalla de acceso propia con sesiones seguras y las mismas credenciales configuradas en el servidor.
 - Bibliotecas globales de archivos recientes, fotos y videos.
@@ -118,6 +120,8 @@ http://localhost:3002
   Ejemplo: `[{"username":"camilo","password":"...","role":"admin"},{"username":"familia","password":"...","role":"viewer"}]`.
 - `CLOUD_STORAGE_DIR`: carpeta donde se guardan los archivos dentro del contenedor.
 - `CLOUD_MAX_FILE_BYTES`: límite por archivo. Por defecto son 8 GB.
+- `CLOUD_ROOM_MAX_BYTES`: capacidad máxima conjunta de cada sala rápida. Por
+  defecto son 2 GB.
 - `CLOUD_AUTH_MAX_ATTEMPTS`: intentos fallidos antes de bloquear IP. Por defecto `5`.
 - `CLOUD_AUTH_WINDOW_MS`: ventana de intentos. Por defecto `900000` (15 minutos).
 - `CLOUD_AUTH_BLOCK_MS`: duración del bloqueo. Por defecto `900000` (15 minutos).
@@ -136,12 +140,42 @@ http://localhost:3002
 - Si lo publicas, usa HTTPS con Cloudflare Tunnel y no abras puertos directos del
   router.
 - Los archivos quedan directamente en el volumen montado.
+- Los archivos recibidos en salas rápidas permanecen aislados y ocultos hasta
+  usar **Guardar en mi nube**. Las salas se cierran y sus archivos temporales se
+  eliminan automáticamente después de 8 minutos con menos de dos dispositivos.
 - Al eliminar desde la app, primero se mueve a `.trash`; al vaciar la papelera sí
   se borra del disco.
 - Para celulares, la página usa el selector nativo de archivos; también acepta
   arrastrar y soltar desde computador.
 - Backups automáticos a otro disco o servicios tipo Backblaze/S3 quedan como
   siguiente paso; esta versión deja la nube local lista y auditable.
+
+## Salas rápidas
+
+1. Inicia sesión como administrador y pulsa **Sala rápida** → **Crear sala**.
+2. Entra a la sala y comparte su enlace o QR con el otro dispositivo. El invitado
+   no necesita iniciar sesión y solo puede ver el contenido de esa sala.
+3. Ambos pueden enviar texto, elegir imágenes, pegarlas desde el portapapeles o
+   arrastrarlas a la sala. El contenido se actualiza automáticamente.
+4. Usa **Copiar texto**, **Copiar imagen** o **Descargar** en cada elemento. Copiar
+   imágenes requiere un navegador compatible y HTTPS (o localhost); la descarga
+   está disponible como alternativa. Los textos se descargan como `.txt`.
+5. El creador, con su sesión iniciada, también puede pulsar **Guardar en mi nube**.
+   Se crea una copia permanente en `Salas rápidas/<nombre de la sala>`; los textos
+   se guardan como `.txt`. El cierre de la sala no elimina esas copias.
+
+La sala permanece abierta mientras haya al menos dos dispositivos conectados.
+Con uno o ninguno, comienza un plazo de **8 minutos** que solo se reinicia al
+volver a haber dos. Varias pestañas del mismo navegador cuentan como un solo
+dispositivo. Al salir se avisa al servidor; una desconexión abrupta se detecta
+tras 45 segundos sin señales de presencia. El servidor elimina las salas vencidas
+aunque nadie vuelva a abrir la web y conserva el plazo al reiniciarse.
+
+Cada texto admite hasta 64 KB y cada envío hasta 20 imágenes. La capacidad total
+de la sala usa `CLOUD_ROOM_MAX_BYTES` (2 GB por defecto). Los nombres repetidos se
+conservan con sufijos, sin sobrescribir lo recibido anteriormente.
+
+Para verificar el proyecto: `npm test` y `npm run build`.
 
 ## Conectar las sesiones con App Hub
 
