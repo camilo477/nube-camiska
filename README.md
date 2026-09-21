@@ -156,7 +156,12 @@ http://localhost:3002
 2. Entra a la sala y comparte su enlace o QR con el otro dispositivo. El invitado
    no necesita iniciar sesión y solo puede ver el contenido de esa sala.
 3. Ambos pueden enviar texto, elegir imágenes, pegarlas desde el portapapeles o
-   arrastrarlas a la sala. El contenido se actualiza automáticamente.
+   arrastrarlas a la sala. Al pulsar **Añadir imágenes**, el creador con sesión
+   iniciada puede elegir **Del dispositivo** o **De mi nube**. Desde la nube puede
+   recorrer carpetas y seleccionar hasta 20 imágenes, incluso de varias carpetas.
+   Solo se comparten copias de las imágenes elegidas; los originales permanecen
+   en la nube y el invitado no accede a las carpetas privadas. El contenido de la
+   sala se actualiza automáticamente.
 4. Usa **Copiar texto**, **Copiar imagen** o **Descargar** en cada elemento. Copiar
    imágenes requiere un navegador compatible y HTTPS (o localhost); la descarga
    está disponible como alternativa. Los textos se descargan como `.txt`.

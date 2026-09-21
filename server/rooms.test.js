@@ -133,6 +133,83 @@ test("room exchange, authentication, uploads, saving, restart and automatic clea
     assert.equal((await (await request(`/api/rooms/public/${small.token}`)).json()).totalBytes, 700);
   });
 
+  await t.test("only the owner can share selected cloud images as independent room copies", async () => {
+    await fs.mkdir(path.join(directory, "Fotos", "Vacaciones"), { recursive: true });
+    await fs.writeFile(path.join(directory, "Fotos", "foto ñ.png"), "first cloud image");
+    await fs.writeFile(path.join(directory, "Fotos", "Vacaciones", "foto ñ.png"), "second cloud image");
+    await fs.writeFile(path.join(directory, "Fotos", "privada.png"), "not selected");
+    const imported = await create("De mi nube");
+    const route = `/api/rooms/${imported.token}/import`;
+    const paths = ["Fotos/foto ñ.png", "Fotos/Vacaciones/foto ñ.png"];
+    for (const [cookie, expected] of [[undefined, 401], [viewer, 403], [other, 403]]) {
+      assert.equal((await request(route, { method: "POST", cookie, json: { paths } })).status, expected);
+    }
+    assert.equal((await request(route, { method: "POST", cookie: owner, json: { paths }, headers: { Origin: "https://unrelated.invalid" } })).status, 403);
+    const response = await request(route, { method: "POST", cookie: owner, json: { paths: [...paths, paths[0]] } });
+    assert.equal(response.status, 201);
+    const saved = (await response.json()).saved;
+    assert.equal(saved.length, 2);
+    assert.equal(new Set(saved.map(file => file.name)).size, 2);
+    const summary = await (await request(`/api/rooms/public/${imported.token}`)).json();
+    assert.equal(summary.files.length, 2);
+    assert.ok(!JSON.stringify(summary).includes("Fotos/"));
+    assert.ok(summary.files.every(file => file.url.startsWith(`/room-file/${imported.token}/`)));
+    for (let i = 0; i < paths.length; i++) {
+      const file = summary.files.find(file => file.name === saved[i].name);
+      assert.equal(await (await request(file.url)).text(), await fs.readFile(path.join(directory, paths[i]), "utf8"));
+      assert.equal((await request(`/files/${paths[i]}`)).status, 401);
+    }
+    await fs.writeFile(path.join(directory, paths[0]), "original changed");
+    assert.equal(await (await request(summary.files.find(file => file.name === saved[0].name).url)).text(), "first cloud image");
+    assert.equal((await request(route, { method: "POST", cookie: owner, json: { paths } })).status, 201);
+    assert.equal((await (await request(`/api/rooms/public/${imported.token}`)).json()).files.length, 4);
+    await request(`/api/rooms/${imported.token}`, { method: "DELETE", cookie: owner });
+    assert.equal((await request(summary.files[0].url)).status, 404);
+    assert.equal((await request(route, { method: "POST", cookie: owner, json: { paths } })).status, 404);
+    assert.equal(await fs.readFile(path.join(directory, paths[0]), "utf8"), "original changed");
+    assert.equal(await fs.readFile(path.join(directory, "Fotos", "privada.png"), "utf8"), "not selected");
+  });
+
+  await t.test("cloud imports reject hidden, traversal and symlink sources and roll back failed batches", async () => {
+    const imported = await create("Validación de imágenes");
+    const route = `/api/rooms/${imported.token}/import`;
+    const importPaths = paths => request(route, { method: "POST", cookie: owner, json: { paths } });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "camiska-private-test-"));
+    t.after(() => fs.rm(outside, { recursive: true, force: true }));
+    await fs.writeFile(path.join(outside, "secret.png"), "outside storage");
+    await fs.symlink(path.join(outside, "secret.png"), path.join(directory, "linked.png"));
+    await fs.symlink(outside, path.join(directory, "linked-folder"));
+    await fs.mkdir(path.join(directory, ".private"));
+    await fs.writeFile(path.join(directory, ".private", "secret.png"), "hidden");
+    await fs.writeFile(path.join(directory, "huge.png"), "x".repeat(5000));
+    const invalid = [
+      [[], 400], ["Fotos/foto ñ.png", 400], [[null], 400], [[{}], 400],
+      [["Fotos/../huge.png"], 400], [["/huge.png"], 400], [["Fotos\\foto ñ.png"], 400],
+      [[".private/secret.png"], 400], [["linked.png"], 400], [["linked-folder/secret.png"], 400],
+      [["missing.png"], 400], [["bad.svg"], 415], [["huge.png"], 413],
+      [Array(21).fill("Fotos/foto ñ.png"), 400],
+      [["Fotos/foto ñ.png", "missing.png"], 400], [["Fotos/foto ñ.png", "huge.png"], 413]
+    ];
+    for (const [paths, expected] of invalid) {
+      assert.equal((await importPaths(paths)).status, expected, JSON.stringify(paths));
+      assert.deepEqual(await fs.readdir(path.join(directory, ".rooms", imported.token)), []);
+    }
+    await request(`/api/rooms/${imported.token}`, { method: "PATCH", cookie: owner, json: { uploadsEnabled: false } });
+    assert.equal((await importPaths(["Fotos/foto ñ.png"])).status, 403);
+  });
+
+  await t.test("cloud imports and device uploads share the same room quota", async () => {
+    const imported = await create("Cuota compartida");
+    await fs.writeFile(path.join(directory, "quota.png"), "x".repeat(700));
+    const responses = await Promise.all([
+      request(`/api/rooms/${imported.token}/import`, { method: "POST", cookie: owner, json: { paths: ["quota.png"] } }),
+      upload(imported.token, [["device.png", "y".repeat(700)]])
+    ]);
+    assert.deepEqual(responses.map(response => response.status).sort(), [201, 413]);
+    assert.equal((await (await request(`/api/rooms/public/${imported.token}`)).json()).totalBytes, 700);
+    assert.equal((await fs.readdir(path.join(directory, ".rooms", imported.token))).length, 1);
+  });
+
   await t.test("only the owner can save to the cloud, with unique names and checksums", async () => {
     const route = `/api/rooms/${room.token}/save`;
     for (const [cookie, expected] of [[undefined, 401], [viewer, 403], [other, 403]]) {

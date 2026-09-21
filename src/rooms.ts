@@ -1,10 +1,10 @@
 import QRCode from "qrcode";
+import { chooseRoomImages, roomImageExtensions } from "./room-image-picker";
 
 type RoomFile = { name: string; size: number; modifiedAt: string; mediaType: string; url: string; text?: string };
 export type Room = { token: string; name: string; createdAt: string; expiresAt: string | null; serverTime: number; participantCount: number; canSave: boolean; uploadsEnabled: boolean; files: RoomFile[]; totalBytes: number; maxBytes: number };
 
 const escape = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-const imageExtensions = /\.(avif|bmp|gif|heic|heif|ico|jfif|jpe?g|png|tiff?|webp)$/i;
 
 function randomId() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
@@ -38,6 +38,7 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
   let presenceRequest: AbortController | null = null;
   let presenceSequence = 0;
   let noticeTimer = 0;
+  let closeImagePicker: (() => void) | undefined;
 
   document.body.classList.remove("login-page", "drawer-open");
   root.innerHTML = '<main class="public-room-shell public-room-error"><h1>Abriendo sala…</h1><p>Conectando con el otro dispositivo.</p></main>';
@@ -64,6 +65,7 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
 
   function close(message: string) {
     stopped = true;
+    closeImagePicker?.();
     window.clearTimeout(poll);
     window.clearInterval(countdown);
     window.removeEventListener("pagehide", leave);
@@ -75,6 +77,7 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
 
   function status() {
     if (!room) return;
+    if (!room.canSave || !room.uploadsEnabled || busy) closeImagePicker?.();
     const count = root.querySelector("#room-participants");
     const expiry = root.querySelector("#room-expiry");
     if (count) count.textContent = `${room.participantCount} dispositivo${room.participantCount === 1 ? "" : "s"} conectado${room.participantCount === 1 ? "" : "s"}`;
@@ -116,7 +119,13 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
     const canvas = root.querySelector<HTMLCanvasElement>("#room-qr");
     if (canvas) void QRCode.toCanvas(canvas, roomUrl, { width: 196, margin: 1, color: { dark: "#1e1f20", light: "#ffffff" } }).catch(() => notice("No pudimos dibujar el QR. Puedes copiar el enlace.", true));
     root.querySelector("#room-copy-link")?.addEventListener("click", () => { void copyText(roomUrl).then(() => notice("Enlace copiado")).catch(() => notice("Selecciona el enlace para copiarlo.", true)); });
-    root.querySelector("#room-pick-images")?.addEventListener("click", () => root.querySelector<HTMLInputElement>("#room-images")?.click());
+    root.querySelector("#room-pick-images")?.addEventListener("click", () => {
+      if (busy || stopped || !room?.uploadsEnabled) return;
+      const fromDevice = () => root.querySelector<HTMLInputElement>("#room-images")?.click();
+      if (!room.canSave) return fromDevice();
+      closeImagePicker?.();
+      closeImagePicker = chooseRoomImages(root, fromDevice, paths => { void shareCloudImages(paths); });
+    });
     root.querySelector<HTMLInputElement>("#room-images")?.addEventListener("change", event => {
       const input = event.currentTarget as HTMLInputElement;
       const files = Array.from(input.files ?? []);
@@ -171,6 +180,8 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
     if (response.ok) return;
     const body = await response.json().catch(() => ({})) as { error?: string };
     if (response.status === 404) close("La sala se cerró y su contenido temporal se eliminó.");
+    if (body.error === "source_not_found") throw new Error("Una imagen ya no está en esa carpeta. Vuelve a seleccionarla desde tu nube.");
+    if (body.error === "invalid_path") throw new Error("No se puede compartir esa imagen. Elige otra imagen de tu nube.");
     const messages: Record<string, string> = { room_quota_exceeded: "La sala alcanzó su límite de almacenamiento.", text_too_large: "El texto supera el límite de 64 KB.", uploads_disabled: "El creador pausó los envíos.", image_required: "Elige imágenes JPG, PNG, GIF, WebP, HEIC u otro formato de imagen compatible.", file_too_large: "La imagen supera el tamaño permitido.", too_many_files: "Puedes enviar hasta 20 imágenes a la vez." };
     throw new Error(messages[body.error ?? ""] ?? (response.status === 401 ? "Tu sesión venció. Vuelve a iniciar sesión en tu nube." : response.status === 403 ? "No tienes permiso para esta acción." : response.status === 429 ? "Demasiados envíos. Intenta más tarde." : "No pudimos completar la acción."));
   }
@@ -193,16 +204,30 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
   async function uploadImages(files: File[]) {
     if (!files.length || busy || !room?.uploadsEnabled || stopped) return;
     if (files.length > 20) return notice("Puedes enviar hasta 20 imágenes a la vez.", true);
-    if (files.some(file => !imageExtensions.test(file.name))) return notice("Solo se admiten imágenes. Para texto, usa el cuadro de arriba.", true);
+    if (files.some(file => !roomImageExtensions.test(file.name))) return notice("Solo se admiten imágenes. Para texto, usa el cuadro de arriba.", true);
     busy = true;
     status();
     const body = new FormData();
     for (const file of files) body.append("files", file, file.name);
     try {
       await checkResponse(await fetch(`${endpoint}/upload`, { method: "POST", body }));
-      notice(`${files.length} imagen${files.length === 1 ? " compartida" : "es compartidas"}`);
+      notice(`${files.length} ${files.length === 1 ? "imagen compartida" : "imágenes compartidas"}`);
       await refresh();
     } catch (error) { notice(error instanceof Error ? error.message : "No pudimos compartir las imágenes.", true); }
+    finally { busy = false; status(); }
+  }
+
+  async function shareCloudImages(paths: string[]) {
+    if (!paths.length || busy || stopped || !room?.canSave || !room.uploadsEnabled) return;
+    busy = true;
+    status();
+    try {
+      const response = await fetch(`/api/rooms/${token}/import`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths }) });
+      await checkResponse(response);
+      const result = await response.json() as { saved: RoomFile[] };
+      notice(`${result.saved.length} ${result.saved.length === 1 ? "imagen compartida" : "imágenes compartidas"} desde tu nube`);
+      await refresh();
+    } catch (error) { notice(error instanceof Error ? error.message : "No pudimos compartir las imágenes de tu nube.", true); }
     finally { busy = false; status(); }
   }
 

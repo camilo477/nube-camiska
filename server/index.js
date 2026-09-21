@@ -240,6 +240,12 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (/^\/api\/rooms\/[^/]+\/import$/.test(requestUrl.pathname) && request.method === "POST") {
+      requireAdmin(auth.user);
+      await importRoomImages(request, requestUrl, response, auth);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/trash" && request.method === "GET") {
       await sendTrash(response);
       return;
@@ -853,6 +859,62 @@ async function saveRoomFiles(request, requestUrl, response, auth) {
       await writeLog(auth, request, "room_save", entry.name, { token, target, checksum });
     }
     sendJson(response, 201, { saved, destination });
+  });
+}
+
+async function importRoomImages(request, requestUrl, response, auth) {
+  const token = roomTokenFromPath(requestUrl.pathname);
+  const body = await readJson(request, 64 * 1024);
+  await withRoomFiles(token, async () => {
+    const room = await writableRoom(token);
+    requireRoomOwner(room, auth);
+    if (!Array.isArray(body.paths) || !body.paths.length) return sendJson(response, 400, { error: "file_required" });
+    if (body.paths.length > 20) return sendJson(response, 400, { error: "too_many_files" });
+    const summary = await roomSummary(room);
+    let totalBytes = summary.totalBytes;
+    const staged = [];
+    const saved = [];
+    const resolveTarget = name => path.join(roomStoragePath(token), name);
+    try {
+      for (const relative of new Set(body.paths)) {
+        // Unlike a normalised upload name, an existing source must be exact.
+        // Reject hidden paths and symlinks, including symlinked parent folders.
+        if (typeof relative !== "string" || !relative || relative.includes("\\") || relative.includes("\0") || relative.split("/").some(part => !part || part.startsWith("."))) {
+          throw Object.assign(new Error("invalid_path"), { statusCode: 400 });
+        }
+        if (!roomImageExtensions.has(path.extname(relative).toLowerCase())) throw Object.assign(new Error("image_required"), { statusCode: 415 });
+        let source = storageDir;
+        let stat;
+        for (const part of relative.split("/")) {
+          source = path.join(source, part);
+          stat = await fs.lstat(source);
+          if (stat.isSymbolicLink()) throw Object.assign(new Error("invalid_path"), { statusCode: 400 });
+        }
+        if (!stat.isFile()) throw Object.assign(new Error("image_required"), { statusCode: 415 });
+        if (stat.size > maxFileBytes) throw Object.assign(new Error("file_too_large"), { statusCode: 413 });
+        if (totalBytes + stat.size > maxRoomBytes) throw Object.assign(new Error("room_quota_exceeded"), { statusCode: 413 });
+        const item = { name: path.basename(relative), temporary: resolveTarget(`.upload-${randomBytes(16).toString("hex")}`) };
+        staged.push(item);
+        await fs.copyFile(source, item.temporary, fsConstants.COPYFILE_EXCL);
+        item.size = (await fs.stat(item.temporary)).size;
+        totalBytes += item.size;
+        if (item.size > maxFileBytes) throw Object.assign(new Error("file_too_large"), { statusCode: 413 });
+        if (totalBytes > maxRoomBytes) throw Object.assign(new Error("room_quota_exceeded"), { statusCode: 413 });
+      }
+      await writableRoom(token);
+      for (const item of staged) {
+        const name = await writeUnique(item.name, resolveTarget, target => fs.link(item.temporary, target));
+        saved.push({ name, size: item.size });
+      }
+    } catch (error) {
+      await Promise.all(saved.map(item => fs.rm(resolveTarget(item.name), { force: true })));
+      if (["ENOENT", "ENOTDIR", "ELOOP"].includes(error.code)) throw Object.assign(new Error("source_not_found"), { statusCode: 400 });
+      throw error;
+    } finally {
+      await Promise.all(staged.map(item => fs.rm(item.temporary, { force: true })));
+    }
+    await writeLog(auth, request, "room_import", room.name, { token, count: saved.length });
+    sendJson(response, 201, { saved });
   });
 }
 
