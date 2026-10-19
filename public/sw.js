@@ -1,8 +1,9 @@
-const SHELL_CACHE = "nube-camiska-shell-v3";
-const ASSET_CACHE = "nube-camiska-assets-v3";
+const SHELL_CACHE = "nube-camiska-shell-v4";
+const ASSET_CACHE = "nube-camiska-assets-v4";
 const APP_SHELL = [
   "/",
   "/index.html",
+  "/theme-init.js",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
@@ -60,7 +61,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  const isStaticAsset = url.pathname.startsWith("/assets/") || url.pathname.startsWith("/icons/") || url.pathname === "/manifest.webmanifest" || url.pathname === "/apple-touch-icon.png";
+  const isStaticAsset = url.pathname.startsWith("/assets/") || url.pathname.startsWith("/icons/") || url.pathname === "/theme-init.js" || url.pathname === "/manifest.webmanifest" || url.pathname === "/apple-touch-icon.png";
   if (!isStaticAsset) return;
 
   event.respondWith(

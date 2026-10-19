@@ -1,6 +1,7 @@
 import "./styles.css";
 import QRCode from "qrcode";
 import { openQuickRoom, type Room } from "./rooms";
+import { setupTheme, themeControl } from "./theme";
 
 type Role = "admin" | "viewer";
 type MediaType = "folder" | "image" | "video" | "audio" | "document" | "other";
@@ -91,6 +92,7 @@ let serviceWorkerRefreshing = false;
 const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
 
+setupTheme();
 setupPwa();
 void boot();
 
@@ -112,7 +114,7 @@ async function boot() {
 
 function renderOffline() {
   document.body.classList.remove("login-page");
-  rootElement.innerHTML = `<main class="offline-shell"><img src="/icons/icon-192.png" alt=""><span>Sin conexión</span><h1>Tu nube no está disponible</h1><p>La aplicación está instalada y lista. Conéctate a internet o comprueba que la Raspberry esté encendida para acceder a tus archivos.</p><button class="primary-button" id="retry-connection" type="button">Intentar de nuevo</button><small>Por seguridad, los archivos privados no se guardan en la caché offline.</small></main>`;
+  rootElement.innerHTML = `<main class="offline-shell"><img src="/icons/icon-192.png" alt=""><span>Sin conexión</span><h1>Tu nube no está disponible</h1><p>La aplicación está instalada y lista. Conéctate a internet o comprueba que la Raspberry esté encendida para acceder a tus archivos.</p><button class="primary-button" id="retry-connection" type="button">Intentar de nuevo</button><small>Por seguridad, los archivos privados no se guardan en la caché offline.</small>${themeControl()}</main>`;
   document.querySelector("#retry-connection")?.addEventListener("click", () => void boot());
 }
 
@@ -247,6 +249,7 @@ function renderLogin() {
           <button class="primary-button login-button" type="submit"><span>Entrar a mi nube</span>${icon("chevron", 18)}</button>
           <button class="pwa-install" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>Instalar Nube Camiska</button>
           <small class="privacy-note">${icon("cloud", 15)} Conexión privada · Tus archivos permanecen en tu servidor</small>
+          ${themeControl()}
         </form>
       </section>
     </main>`;
@@ -288,6 +291,7 @@ function renderApp(error = "") {
           ${navItem("files", "home", "Mis archivos")}${navItem("recent", "clock", "Recientes")}${navItem("photos", "image", "Fotos")}${navItem("videos", "video", "Videos")}<button class="nav-item ${section === "files" && currentPath === "Notas" ? "active" : ""}" id="open-notes">${icon("edit", 20)}<span>Notas</span></button>${role === "admin" ? `${navItem("rooms", "users", "Sala rápida")}<span class="nav-separator"></span>${navItem("trash", "trash", "Papelera")}` : ""}
         </nav>
         <div class="sidebar-bottom">
+          ${themeControl()}
           ${storageView()}
           <button class="profile" id="logout"><span class="avatar">${escapeHtml(user.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(user)}</b><small>${role === "admin" ? "Administrador" : "Solo lectura"}</small></span>${icon("logout", 17)}</button>
         </div>

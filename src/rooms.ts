@@ -1,5 +1,6 @@
 import QRCode from "qrcode";
 import { chooseRoomImages, roomImageExtensions } from "./room-image-picker";
+import { themeControl } from "./theme";
 
 type RoomFile = { name: string; size: number; modifiedAt: string; mediaType: string; url: string; text?: string };
 export type Room = { token: string; name: string; createdAt: string; expiresAt: string | null; serverTime: number; participantCount: number; canSave: boolean; uploadsEnabled: boolean; files: RoomFile[]; totalBytes: number; maxBytes: number };
@@ -109,7 +110,7 @@ export async function openQuickRoom(root: HTMLElement, token: string) {
     if (!room) return;
     mounted = true;
     root.innerHTML = `<main class="public-room-shell quick-room">
-      <header class="public-room-header"><span class="public-room-brand">Nube Camiska</span><a class="soft-button" id="room-back" href="/" ${room.canSave ? "" : "hidden"}>Volver a mi nube</a><button class="soft-button" id="room-leave">Salir de la sala</button></header>
+      <header class="public-room-header"><span class="public-room-brand">Nube Camiska</span>${themeControl()}<a class="soft-button" id="room-back" href="/" ${room.canSave ? "" : "hidden"}>Volver a mi nube</a><button class="soft-button" id="room-leave">Salir de la sala</button></header>
       <section class="public-room-hero"><span class="eyebrow">Sala rápida</span><h1>${escape(room.name)}</h1><p>Comparte texto e imágenes entre dispositivos.</p><div class="room-presence"><strong id="room-participants"></strong><span id="room-expiry"></span></div></section>
       <details class="room-invitation" ${room.canSave ? "open" : ""}><summary>Invitar por enlace o QR</summary><div class="room-share-panel"><div class="room-qr"><canvas id="room-qr" aria-label="Código QR para entrar a la sala"></canvas></div><div><h2>Abre esta sala en el otro dispositivo</h2><p>Quien tenga el enlace solo podrá ver lo compartido aquí.</p><div class="room-url"><input aria-label="Enlace de la sala" value="${escape(roomUrl)}" readonly><button class="soft-button" id="room-copy-link">Copiar enlace</button></div></div></div></details>
       <section class="room-composer"><form id="room-text-form"><label for="room-text">Compartir texto</label><textarea id="room-text" name="text" rows="4" maxlength="65536" placeholder="Escribe o pega aquí…"></textarea><div class="room-compose-actions"><button class="primary-button" type="submit" data-compose>Compartir texto</button><button class="soft-button" id="room-pick-images" type="button" data-compose>Añadir imágenes</button><input class="hidden-input" id="room-images" type="file" accept="image/*" multiple></div></form><p id="room-upload-state"></p><p id="room-notice" class="room-notice" role="status" aria-live="polite"></p></section>
