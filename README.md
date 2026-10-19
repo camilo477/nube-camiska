@@ -15,6 +15,9 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
 - Búsqueda por nombre.
 - Orden por nombre, fecha o tamaño, ascendente/descendente.
 - Vista lista y modo galería.
+- Tema automático según el navegador, con selector Sistema / Claro / Oscuro en
+  el acceso, el menú lateral y las salas rápidas. La elección se guarda en este
+  navegador; Sistema sigue los cambios de apariencia del dispositivo.
 - Vista previa de imágenes, videos, audios y PDFs.
 - Papelera: eliminar mueve a `.trash`; vaciar papelera borra permanente.
 - Roles:
