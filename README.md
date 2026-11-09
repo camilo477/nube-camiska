@@ -1,7 +1,7 @@
 # Nube Camiska
 
-Web app privada para subir, organizar, ver, compartir y borrar archivos
-guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
+Aplicación web para subir, organizar, ver, compartir y borrar archivos, con un
+espacio privado independiente por cuenta y una demo opcional para el portafolio. El frontend está hecho con Vite
 + TypeScript y el backend es un servidor Node pequeño, sin base de datos.
 
 ## Funciones
@@ -31,12 +31,69 @@ guardados en el disco conectado a la Raspberry. El frontend está hecho con Vite
   darles acceso al resto de la nube.
 - Dashboard básico de almacenamiento y tipos de archivo.
 - Pantalla de acceso propia con sesiones seguras y las mismas credenciales configuradas en el servidor.
-- Bibliotecas globales de archivos recientes, fotos y videos.
+- Bibliotecas de archivos recientes, fotos y videos de cada cuenta.
 - PWA instalable en Android, iPhone/iPad y computadores, con iconos adaptativos,
   modo independiente, actualizaciones y una pantalla segura sin conexión.
 - Logs diarios en `.logs/YYYY-MM-DD.log`.
 - Checksum SHA-256 para archivos subidos.
 - Bloqueo de IP tras varios intentos fallidos.
+
+## Cuentas independientes y demo del portafolio
+
+Cada cuenta tiene sus propios archivos, notas, papelera, biblioteca, estadísticas,
+checksums, enlaces y salas. El rol `admin` permite administrar **su propio espacio**;
+no da acceso a las cuentas de otras personas. Una cuenta `viewer` también tiene
+un espacio independiente, con permisos de solo lectura.
+
+### Actualizar una instalación existente
+
+1. Conserva el mismo volumen y `CLOUD_STORAGE_DIR`. Respalda el volumen antes de
+   actualizar. En la Raspberry verifica `mountpoint /mnt/disco` antes de arrancar.
+2. Antes del primer inicio de esta versión, configura `CLOUD_LEGACY_USER` con el
+   nombre de tu cuenta personal actual. Si no se define, se usa `CLOUD_USER` si
+   corresponde a una cuenta configurada; en su defecto, la primera cuenta `admin`
+   será propietaria de los archivos que ya estaban en la raíz.
+3. El servidor guarda esa decisión en `.accounts-layout.json` dentro del volumen.
+   **No mueve ni borra tus archivos actuales.** La cuenta original sigue usando
+   la raíz; las demás usan directorios privados dentro de `.accounts/`, identificados
+   mediante un hash del nombre de usuario.
+4. El propietario original queda fijado aunque cambie el orden de `CLOUD_USERS_JSON`.
+   No borres el archivo de distribución ni renombres cuentas sin planear su migración.
+   Si retiras una cuenta de la configuración, sus sesiones dejan de tener acceso,
+   pero sus archivos permanecen en el disco.
+
+Los usuarios configurados anteriormente como visores dejan de ver automáticamente
+el espacio del propietario: ahora tienen su propio espacio. Los enlaces públicos
+siguen dando acceso solo al archivo o sala elegidos y a quien conozca el token.
+Los enlaces simbólicos no se siguen para entrar en otros espacios o rutas del host.
+
+### Activar la demo
+
+Añade a tu archivo de variables del servidor:
+
+```env
+CLOUD_DEMO_ENABLED=true
+```
+
+Recrea el contenedor pasando ese archivo con `--env-file`. Aparecerá **Explorar demo**, sin publicar una contraseña. Puedes enlazar
+`https://tu-dominio-nube/?demo=1` desde el portafolio.
+
+La cuenta reservada `portfolio-demo` tiene **solo lectura** y un directorio propio
+con documentos, notas, un proyecto e imagen ficticios. Puede navegar, buscar,
+previsualizar y descargar. No puede subir, editar, borrar, compartir, crear salas
+ni acceder a archivos de otras cuentas. Los ejemplos se conservan al reiniciar;
+no se sobrescriben los que ya existan. Las sesiones de prueba duran como máximo
+2 horas y se limita la creación repetida de sesiones desde una misma IP.
+
+Desactivar `CLOUD_DEMO_ENABLED` retira el botón y revoca el acceso de sus sesiones.
+Los archivos personales nunca se copian a la demo. La demo utiliza el mismo servidor;
+requiere que el servidor y su almacenamiento estén disponibles. Para un dominio
+de demostración con disponibilidad independiente puedes desplegar otro contenedor
+con un volumen separado y los mismos ejemplos.
+
+Para añadir cuentas normales configura `CLOUD_USERS_JSON` (consulta `.env.example`).
+No hay registro público de usuarios. `CLOUD_LEGACY_USER` solo fija el propietario
+inicial de los archivos existentes.
 
 ## Desarrollo local
 
@@ -48,7 +105,7 @@ npm run build
 Para probar el servidor completo:
 
 ```bash
-CLOUD_USER=camiska \
+CLOUD_USER=propietario \
 CLOUD_PASSWORD="cambia-esta-clave" \
 CLOUD_VIEWER_USER=visor \
 CLOUD_VIEWER_PASSWORD="clave-solo-lectura" \
@@ -85,7 +142,7 @@ docker run -d \
   --name nube-camiska \
   --restart unless-stopped \
   -p 3002:8080 \
-  -e CLOUD_USER="camiska" \
+  -e CLOUD_USER="propietario" \
   -e CLOUD_PASSWORD="pon-una-clave-larga" \
   -e CLOUD_VIEWER_USER="visor" \
   -e CLOUD_VIEWER_PASSWORD="otra-clave-larga" \
@@ -119,7 +176,9 @@ http://localhost:3002
 - `CLOUD_PASSWORD`: contraseña del administrador.
 - `CLOUD_VIEWER_USER`: usuario opcional de solo lectura.
 - `CLOUD_VIEWER_PASSWORD`: clave opcional de solo lectura.
-- `CLOUD_USERS_JSON`: alternativa avanzada para definir varios usuarios.
+- `CLOUD_DEMO_ENABLED`: `true` habilita la demo de solo lectura; desactivada por defecto.
+- `CLOUD_LEGACY_USER`: propietario inicial de los archivos que ya existen en la raíz.
+- `CLOUD_USERS_JSON`: alternativa avanzada para definir varios usuarios con espacios independientes.
   Ejemplo: `[{"username":"camilo","password":"...","role":"admin"},{"username":"familia","password":"...","role":"viewer"}]`.
 - `CLOUD_STORAGE_DIR`: carpeta donde se guardan los archivos dentro del contenedor.
 - `CLOUD_MAX_FILE_BYTES`: límite por archivo. Por defecto son 8 GB.
@@ -137,8 +196,9 @@ http://localhost:3002
 - La pantalla de acceso valida las credenciales en el servidor y crea una cookie
   de sesión `HttpOnly`, `SameSite=Strict`, válida durante siete días. En producción
   el servidor falla si no defines usuarios/clave.
-- `CLOUD_USER`, `CLOUD_PASSWORD` y `CLOUD_USERS_JSON` siguen siendo la única
-  fuente de usuarios: el nuevo login no crea ni cambia contraseñas.
+- `CLOUD_USER`, `CLOUD_PASSWORD` y `CLOUD_USERS_JSON` definen las cuentas
+  privadas; el login no crea ni cambia contraseñas. La demo de solo lectura se
+  habilita por separado con `CLOUD_DEMO_ENABLED`.
 - Usa una clave larga y un valor distinto, largo y aleatorio para `CLOUD_SECURITY_TOKEN`.
 - Si lo publicas, usa HTTPS con Cloudflare Tunnel y no abras puertos directos del
   router.

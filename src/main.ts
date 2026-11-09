@@ -65,6 +65,8 @@ const root = document.querySelector<HTMLDivElement>("#root");
 if (!root) throw new Error("No se encontró #root");
 const rootElement = root;
 
+let demoEnabled = false;
+let demoSession = false;
 let authenticated = false;
 let loginError = "";
 let user = "";
@@ -100,9 +102,15 @@ async function boot() {
   const publicToken = location.pathname.match(/^\/room\/([a-f0-9]{48})\/?$/)?.[1];
   if (publicToken) return openQuickRoom(rootElement, publicToken);
   try {
-    const response = await fetch("/api/me");
-    if (!response.ok) return renderLogin();
-    const me = await response.json() as { user: string; role: Role };
+    const [configuration, response] = await Promise.all([fetch("/api/config"), fetch("/api/me")]);
+    if (configuration.ok) demoEnabled = Boolean((await configuration.json()).demoEnabled);
+    if (!response.ok) {
+      if (demoEnabled && new URLSearchParams(location.search).get("demo") === "1") return submitDemo();
+      return renderLogin();
+    }
+    const me = await response.json() as { user: string; role: Role; demo?: boolean };
+    if (demoEnabled && new URLSearchParams(location.search).get("demo") === "1" && !me.demo) return submitDemo();
+    demoSession = Boolean(me.demo);
     authenticated = true;
     user = me.user;
     role = me.role;
@@ -114,7 +122,7 @@ async function boot() {
 
 function renderOffline() {
   document.body.classList.remove("login-page");
-  rootElement.innerHTML = `<main class="offline-shell"><img src="/icons/icon-192.png" alt=""><span>Sin conexión</span><h1>Tu nube no está disponible</h1><p>La aplicación está instalada y lista. Conéctate a internet o comprueba que la Raspberry esté encendida para acceder a tus archivos.</p><button class="primary-button" id="retry-connection" type="button">Intentar de nuevo</button><small>Por seguridad, los archivos privados no se guardan en la caché offline.</small>${themeControl()}</main>`;
+  rootElement.innerHTML = `<main class="offline-shell"><img src="/icons/icon-192.png" alt=""><span>Sin conexión</span><h1>Tu nube no está disponible</h1><p>La aplicación está instalada y lista. Conéctate a internet o comprueba que el servidor esté disponible para acceder a tus archivos.</p><button class="primary-button" id="retry-connection" type="button">Intentar de nuevo</button><small>Por seguridad, los archivos privados no se guardan en la caché offline.</small>${themeControl()}</main>`;
   document.querySelector("#retry-connection")?.addEventListener("click", () => void boot());
 }
 
@@ -242,23 +250,41 @@ function renderLogin() {
           <div class="mobile-brand">${icon("cloud", 26)} Nube Camiska</div>
           <span class="welcome-pill">Bienvenido</span>
           <h2>Entra a tu nube</h2>
-          <p>Usa el mismo usuario y contraseña que ya tienes configurados.</p>
+          <p>Accede a tu espacio privado con tu usuario y contraseña.</p>
           <label>Usuario<input id="login-user" name="username" autocomplete="username" required autofocus placeholder="Tu usuario"></label>
           <label>Contraseña<div class="password-field"><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Tu contraseña"><button id="toggle-password" type="button" aria-label="Mostrar contraseña">${icon("eye", 18)}</button></div></label>
           ${loginError ? `<div class="login-error">${escapeHtml(loginError)}</div>` : ""}
           <button class="primary-button login-button" type="submit"><span>Entrar a mi nube</span>${icon("chevron", 18)}</button>
+          ${demoEnabled ? `<button class="soft-button demo-entry" id="explore-demo" type="button">Explorar demo</button><p class="demo-help">Una nube de ejemplo de solo lectura, con archivos ficticios.</p>` : ""}
           <button class="pwa-install" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>Instalar Nube Camiska</button>
           <small class="privacy-note">${icon("cloud", 15)} Conexión privada · Tus archivos permanecen en tu servidor</small>
           ${themeControl()}
         </form>
       </section>
     </main>`;
+  document.querySelector("#explore-demo")?.addEventListener("click", () => void submitDemo());
   document.querySelector("#login-form")?.addEventListener("submit", event => void submitLogin(event));
   document.querySelector("#toggle-password")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("#login-password");
     if (input) input.type = input.type === "password" ? "text" : "password";
   });
   document.querySelector("#install-app")?.addEventListener("click", () => void installApp());
+}
+
+async function submitDemo() {
+  const button = document.querySelector<HTMLButtonElement>("#explore-demo");
+  if (button) { button.disabled = true; button.textContent = "Preparando demo…"; }
+  try {
+    const response = await fetch("/api/demo", { method: "POST" });
+    if (!response.ok) throw new Error(response.status === 429 ? "Espera unos minutos antes de abrir otra sesión de prueba." : "La demo no está disponible en este momento.");
+    const me = await response.json() as { user: string; role: Role };
+    authenticated = true; demoSession = true; user = me.user; role = me.role; loginError = "";
+    currentPath = ""; section = "files"; selected.clear(); previewPath = null; dialog = null; noteDraft = null; items = []; dashboard = null;
+    await Promise.all([loadDashboard(), loadSection()]);
+  } catch (error) {
+    loginError = error instanceof Error ? error.message : "No se pudo conectar con la demo.";
+    renderLogin();
+  }
 }
 
 async function submitLogin(event: Event) {
@@ -273,7 +299,7 @@ async function submitLogin(event: Event) {
     return renderLogin();
   }
   const me = await response.json() as { user: string; role: Role };
-  authenticated = true; user = me.user; role = me.role; loginError = "";
+  authenticated = true; demoSession = false; user = me.user; role = me.role; loginError = "";
   document.body.classList.remove("login-page");
   await Promise.all([loadDashboard(), loadSection()]);
 }
@@ -293,7 +319,7 @@ function renderApp(error = "") {
         <div class="sidebar-bottom">
           ${themeControl()}
           ${storageView()}
-          <button class="profile" id="logout"><span class="avatar">${escapeHtml(user.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(user)}</b><small>${role === "admin" ? "Administrador" : "Solo lectura"}</small></span>${icon("logout", 17)}</button>
+          <button class="profile" id="logout"><span class="avatar">${escapeHtml(user.slice(0, 1).toUpperCase())}</span><span><b>${demoSession ? "Visitante demo" : escapeHtml(user)}</b><small>${role === "admin" ? "Administrador" : "Solo lectura"}</small></span>${icon("logout", 17)}</button>
         </div>
       </aside>
       <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="Cerrar menú"></button>
@@ -303,6 +329,7 @@ function renderApp(error = "") {
           <label class="global-search">${icon(section === "rooms" ? "users" : "search", 19)}<input id="search" value="${escapeAttribute(query)}" placeholder="${section === "rooms" ? "Tus salas temporales" : "Buscar en esta vista…"}" ${section === "rooms" ? "disabled" : ""}></label>
           <div class="top-actions"><button class="soft-button install-action" id="install-app" type="button" ${canOfferInstall() ? "" : "hidden"}>${icon("download", 17)}<span>Instalar</span></button>${role === "admin" ? section === "rooms" ? `<button class="primary-button" id="new-room">${icon("plus", 17)}<span>Crear sala</span></button>` : `<button class="soft-button" id="new-note">${icon("edit", 17)}<span>Nueva nota</span></button><button class="soft-button" id="new-folder" ${section !== "files" ? "disabled" : ""}>${icon("folder", 17)}<span>Nueva carpeta</span></button>` : ""}<button class="avatar top-avatar" title="${escapeAttribute(user)}">${escapeHtml(user.slice(0, 1).toUpperCase())}</button></div>
         </header>
+        ${demoSession ? `<aside class="demo-banner"><strong>Demo del portafolio</strong><span>Archivos ficticios · Solo lectura · Espacio independiente de las cuentas personales</span></aside>` : ""}
         <main class="content ${section === "rooms" ? "rooms-content" : ""}">
           ${section === "rooms" ? `${error ? `<div class="error-banner">${escapeHtml(error)}</div>` : ""}${roomsContentMarkup()}` : `
           <div class="content-header">
@@ -536,7 +563,7 @@ function bindRoomEvents() {
 
 function bindAppEvents() {
   document.querySelectorAll<HTMLElement>("[data-section]").forEach(button => button.addEventListener("click", () => { toggleMobileSidebar(false); section = button.dataset.section as Section; currentPath = ""; query = ""; selected.clear(); void loadSection(); }));
-  document.querySelector("#logout")?.addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); authenticated = false; if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; } renderLogin(); });
+  document.querySelector("#logout")?.addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); authenticated = false; if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; } const exitUrl = new URL(location.href); exitUrl.searchParams.delete("demo"); exitUrl.pathname = "/"; location.assign(exitUrl.toString()); });
   document.querySelector("#mobile-menu")?.addEventListener("click", () => toggleMobileSidebar(true));
   document.querySelector("#close-mobile-menu")?.addEventListener("click", () => toggleMobileSidebar(false));
   document.querySelector("#sidebar-scrim")?.addEventListener("click", () => toggleMobileSidebar(false));

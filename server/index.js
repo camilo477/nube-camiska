@@ -1,19 +1,20 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
-import { constants as fsConstants, createReadStream, readFileSync, renameSync, writeFileSync, promises as fs } from "node:fs";
+import { constants as fsConstants, createReadStream, lstatSync, readFileSync, renameSync, writeFileSync, promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { reconcilePresence, updatePresence } from "./room-presence.js";
 import { receiveMultipart, writeUnique } from "./uploads.js";
+import { createAccountStorage, demoAccount } from "./accounts.js";
 
 const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "dist");
-const storageDir = path.resolve(process.env.CLOUD_STORAGE_DIR ?? path.join(rootDir, "data"));
+const baseStorageDir = path.resolve(process.env.CLOUD_STORAGE_DIR ?? path.join(rootDir, "data"));
 const port = Number(process.env.PORT ?? 8080);
 const maxFileBytes = Number(process.env.CLOUD_MAX_FILE_BYTES ?? process.env.CLOUD_MAX_UPLOAD_BYTES ?? 1024 * 1024 * 1024 * 8);
 const failWindowMs = Number(process.env.CLOUD_AUTH_WINDOW_MS ?? 15 * 60 * 1000);
@@ -31,6 +32,7 @@ const roomsDirName = ".rooms";
 const maxRoomBytes = Number(process.env.CLOUD_ROOM_MAX_BYTES ?? 1024 * 1024 * 1024 * 2);
 
 const users = buildUsers();
+const demoEnabled = process.env.CLOUD_DEMO_ENABLED === "true";
 let checksumMutationQueue = Promise.resolve();
 let roomMutationQueue = Promise.resolve();
 const guestUploadAttempts = new Map();
@@ -72,17 +74,36 @@ if (process.env.NODE_ENV === "production" && users.length === 0) {
   throw new Error("Define CLOUD_USER/CLOUD_PASSWORD o CLOUD_USERS_JSON antes de correr en producción.");
 }
 
-await fs.mkdir(storageDir, { recursive: true });
-await fs.mkdir(path.join(storageDir, trashDirName), { recursive: true });
-await fs.mkdir(path.join(storageDir, logsDirName), { recursive: true });
-await fs.mkdir(path.join(storageDir, roomsDirName), { recursive: true });
-
+await fs.mkdir(baseStorageDir, { recursive: true });
 if (runSecurityCommand()) process.exit();
+const accountStorage = await createAccountStorage(baseStorageDir, users.length ? users : [{ username: "dev", role: "admin" }], demoEnabled);
+const storageDir = () => accountStorage.root();
 
-const server = http.createServer(async (request, response) => {
+const server = http.createServer((request, response) => accountStorage.run(undefined, async () => {
   try {
     setSecurityHeaders(request, response);
     const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+    if (requestUrl.pathname === "/api/config" && request.method === "GET") {
+      response.setHeader("Cache-Control", "no-store");
+      return sendJson(response, 200, { demoEnabled });
+    }
+    if (requestUrl.pathname === "/api/demo" && request.method === "POST") {
+      if (!demoEnabled) return sendJson(response, 404, { error: "not_found" });
+      if (!sameOrigin(request)) return sendJson(response, 403, { error: "origin_not_allowed" });
+      const state = cleanSecurityState(readSecurityState());
+      const ip = getClientIp(request);
+      if (state.sessions.filter(session => session.username === demoAccount.username && session.ip === ip && session.createdAt > Date.now() - 600000).length >= 5) {
+        return sendJson(response, 429, { error: "too_many_attempts" });
+      }
+      return createSession(request, response, demoAccount, state);
+    }
+    const capability = requestUrl.pathname.match(/^\/(share|room-file)\/([a-f0-9]{48})(?:\/|$)/) || requestUrl.pathname.match(/^\/api\/rooms\/(public)\/([a-f0-9]{48})(?:\/|$)/);
+    if (capability) {
+      const scope = await accountStorage.publicScope(capability[2], capability[1] === "share" ? "share" : "room");
+      if (!scope) return sendJson(response, 404, { error: "not_found" });
+      accountStorage.enter(scope.user);
+    }
 
     if (requestUrl.pathname.startsWith("/share/") && request.method === "GET") {
       await sendSharedFile(requestUrl, response);
@@ -128,6 +149,9 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    accountStorage.enter(auth.user);
+    response.setHeader("Cache-Control", "private, no-store");
+
     if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && !sameOrigin(request)) {
       sendJson(response, 403, { error: "origin_not_allowed" });
       return;
@@ -139,7 +163,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (requestUrl.pathname === "/api/me" && request.method === "GET") {
-      sendJson(response, 200, { user: auth.user.username, role: auth.user.role });
+      sendJson(response, 200, { user: auth.user.username, role: auth.user.role, demo: Boolean(auth.user.demo) });
       return;
     }
 
@@ -270,19 +294,21 @@ const server = http.createServer(async (request, response) => {
 
     sendJson(response, 404, { error: "not_found" });
   } catch (error) {
-    console.error(error);
-    const status = error.statusCode ?? 500;
-    sendJson(response, status, { error: status === 500 ? "server_error" : error.message });
+    const status = error.statusCode ?? (["ENOENT", "ENOTDIR"].includes(error.code) ? 404 : 500);
+    if (status >= 500) console.error(error);
+    sendJson(response, status, { error: status === 500 ? "server_error" : ["ENOENT", "ENOTDIR"].includes(error.code) ? "not_found" : error.message });
   }
-});
+}));
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Nube Camiska escuchando en http://0.0.0.0:${server.address().port}`);
-  console.log(`Guardando archivos en ${storageDir}`);
+  console.log(`Guardando archivos en ${baseStorageDir}`);
 });
 
 // Cleanup runs even when every browser has left the room.
-setInterval(() => { void removeExpiredRooms().catch(console.error); }, 1000).unref();
+setInterval(() => {
+  for (const scope of accountStorage.scopes()) void accountStorage.run(scope, () => removeExpiredRooms().catch(console.error));
+}, 1000).unref();
 
 function buildUsers() {
   const parsed = parseUsersJson();
@@ -336,9 +362,11 @@ function authenticate(request) {
     session.ip = getClientIp(request);
     writeSecurityState(state);
   }
+  const user = accountStorage.user(session.username);
+  if (!user) return { ok: false, status: 401, error: "auth_required" };
   return {
     ok: true,
-    user: { username: session.username, role: session.role },
+    user,
     session,
     state
   };
@@ -364,7 +392,7 @@ async function login(request, response) {
   const user = users.length
     ? users.find((candidate) => safeEqual(candidate.username, username) && safeEqual(candidate.password, password))
     : process.env.NODE_ENV !== "production" && username === "dev" && password === "dev"
-      ? { username: "dev", role: "admin" }
+      ? accountStorage.user("dev")
       : null;
 
   if (!user) {
@@ -374,6 +402,12 @@ async function login(request, response) {
     return;
   }
 
+  return createSession(request, response, user, cleanSecurityState(readSecurityState()));
+}
+
+function createSession(request, response, user, state) {
+  const ip = getClientIp(request);
+  const now = Date.now();
   delete state.attempts[ip];
   const token = randomBytes(32).toString("base64url");
   const device = getDeviceName(request.headers["user-agent"]);
@@ -386,12 +420,12 @@ async function login(request, response) {
     ip,
     createdAt: now,
     lastSeen: now,
-    expiresAt: now + sessionDurationMs
+    expiresAt: now + (user.demo ? Math.min(sessionDurationMs, 2 * 60 * 60 * 1000) : sessionDurationMs)
   });
   addSecurityEvent(state, { result: "success", username: user.username, ip, device });
   writeSecurityState(state);
-  response.setHeader("Set-Cookie", serializeSessionCookie(request, token, sessionDurationMs));
-  sendJson(response, 200, { user: user.username, role: user.role });
+  response.setHeader("Set-Cookie", serializeSessionCookie(request, token, user.demo ? Math.min(sessionDurationMs, 2 * 60 * 60 * 1000) : sessionDurationMs));
+  sendJson(response, 200, { user: user.username, role: user.role, demo: Boolean(user.demo) });
 }
 
 function logout(request, response) {
@@ -454,7 +488,7 @@ function registerFailedAttempt(state, ip, request) {
 
 function readSecurityState() {
   try {
-    return JSON.parse(readFileSync(path.join(storageDir, securityFileName), "utf8"));
+    return JSON.parse(readFileSync(path.join(baseStorageDir, securityFileName), "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
     return { sessions: [], attempts: {}, events: [] };
@@ -462,7 +496,7 @@ function readSecurityState() {
 }
 
 function writeSecurityState(state) {
-  const target = path.join(storageDir, securityFileName);
+  const target = path.join(baseStorageDir, securityFileName);
   const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, target);
@@ -588,10 +622,10 @@ function requireAdmin(user) {
 }
 
 async function sendHealth(response) {
-  const stat = await fs.stat(storageDir);
+  const stat = await fs.stat(storageDir());
   sendJson(response, 200, {
     ok: true,
-    storageDir,
+    storageDir: "/",
     writable: stat.isDirectory(),
     maxFileBytes
   });
@@ -604,7 +638,7 @@ async function sendDirectory(requestUrl, response) {
   const checksums = await readJsonStore(checksumsFileName, {});
   const items = await Promise.all(
     entries
-      .filter((entry) => !entry.name.startsWith("."))
+      .filter((entry) => !entry.name.startsWith(".") && !entry.isSymbolicLink())
       .map(async (entry) => {
         const entryRelativePath = joinRelative(relativePath, entry.name);
         const entryPath = path.join(absolutePath, entry.name);
@@ -883,7 +917,7 @@ async function importRoomImages(request, requestUrl, response, auth) {
           throw Object.assign(new Error("invalid_path"), { statusCode: 400 });
         }
         if (!roomImageExtensions.has(path.extname(relative).toLowerCase())) throw Object.assign(new Error("image_required"), { statusCode: 415 });
-        let source = storageDir;
+        let source = storageDir();
         let stat;
         for (const part of relative.split("/")) {
           source = path.join(source, part);
@@ -1084,7 +1118,7 @@ function roomTokenFromPath(pathname) {
 
 function roomStoragePath(token) {
   if (!/^[a-f0-9]{48}$/.test(token)) throw Object.assign(new Error("room_not_found"), { statusCode: 404 });
-  return path.join(storageDir, roomsDirName, token);
+  return path.join(storageDir(), roomsDirName, token);
 }
 
 function allowGuestUpload(ip, token) {
@@ -1113,7 +1147,7 @@ async function trashEntry(request, requestUrl, response, auth) {
   const targetPath = toStoragePath(relativePath);
   await fs.stat(targetPath);
   const trashedName = `${Date.now()}-${path.basename(relativePath)}`;
-  const trashTarget = path.join(storageDir, trashDirName, trashedName);
+  const trashTarget = path.join(storageDir(), trashDirName, trashedName);
   await fs.rename(targetPath, trashTarget);
   await removeChecksum(relativePath);
   await writeLog(auth, request, "trash", relativePath, { target: `${trashDirName}/${trashedName}` });
@@ -1121,10 +1155,10 @@ async function trashEntry(request, requestUrl, response, auth) {
 }
 
 async function sendTrash(response) {
-  const entries = await fs.readdir(path.join(storageDir, trashDirName), { withFileTypes: true });
+  const entries = await fs.readdir(path.join(storageDir(), trashDirName), { withFileTypes: true });
   const items = await Promise.all(
     entries.map(async (entry) => {
-      const absolutePath = path.join(storageDir, trashDirName, entry.name);
+      const absolutePath = path.join(storageDir(), trashDirName, entry.name);
       const stat = await fs.stat(absolutePath);
       return {
         name: entry.name,
@@ -1138,7 +1172,7 @@ async function sendTrash(response) {
 }
 
 async function emptyTrash(response, auth) {
-  const trashPath = path.join(storageDir, trashDirName);
+  const trashPath = path.join(storageDir(), trashDirName);
   await fs.rm(trashPath, { recursive: true, force: true });
   await fs.mkdir(trashPath, { recursive: true });
   await writeLog(auth, null, "empty_trash", trashDirName);
@@ -1146,7 +1180,7 @@ async function emptyTrash(response, auth) {
 }
 
 async function sendDashboard(response) {
-  const disk = await getDiskUsage(storageDir);
+  const disk = await getDiskUsage(storageDir());
   const stats = {
     usedBytes: 0,
     freeBytes: disk.freeBytes,
@@ -1166,6 +1200,8 @@ async function sendDashboard(response) {
     stats.monthlyGrowth[month] = (stats.monthlyGrowth[month] ?? 0) + stat.size;
   });
 
+  stats.totalBytes = accountStorage.current()?.user.demo ? 25 * 1024 * 1024 : stats.usedBytes + disk.freeBytes;
+  stats.freeBytes = Math.max(0, stats.totalBytes - stats.usedBytes);
   sendJson(response, 200, stats);
 }
 
@@ -1225,6 +1261,7 @@ async function sendStoredFile(request, requestUrl, response) {
 
 async function sendSharedFile(requestUrl, response) {
   const token = requestUrl.pathname.replace(/^\/share\//, "");
+  if (!/^[a-f0-9]{48}$/.test(token)) return sendJson(response, 404, { error: "share_not_found" });
   const shares = await readJsonStore(sharesFileName, {});
   const share = shares[token];
 
@@ -1241,7 +1278,7 @@ async function sendSharedFile(requestUrl, response) {
 }
 
 async function streamStoredFile(relativePath, request, response) {
-  await streamAbsoluteFile(toStoragePath(relativePath), request, response);
+  await streamAbsoluteFile(toStoragePath(relativePath), request, response, { untrusted: true });
 }
 
 async function streamAbsoluteFile(absolutePath, request, response, options = {}) {
@@ -1357,7 +1394,7 @@ async function walkStorage(relativePath, onFile) {
   const entries = await fs.readdir(absolutePath, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.name.startsWith(".")) {
+    if (entry.name.startsWith(".") || entry.isSymbolicLink()) {
       continue;
     }
 
@@ -1375,7 +1412,7 @@ async function walkStorage(relativePath, onFile) {
 
 async function readJsonStore(name, fallback) {
   try {
-    const content = await fs.readFile(path.join(storageDir, name), "utf8");
+    const content = await fs.readFile(path.join(storageDir(), name), "utf8");
     return JSON.parse(content);
   } catch {
     return fallback;
@@ -1383,7 +1420,7 @@ async function readJsonStore(name, fallback) {
 }
 
 async function writeJsonStore(name, value) {
-  const target = path.join(storageDir, name);
+  const target = path.join(storageDir(), name);
   const temporary = `${target}.${randomBytes(8).toString("hex")}.tmp`;
   try {
     await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
@@ -1436,7 +1473,7 @@ async function writeLog(auth, request, action, target, extra = {}) {
     target,
     ...extra
   });
-  const logPath = path.join(storageDir, logsDirName, `${new Date().toISOString().slice(0, 10)}.log`);
+  const logPath = path.join(storageDir(), logsDirName, `${new Date().toISOString().slice(0, 10)}.log`);
   await fs.appendFile(logPath, `${line}\n`);
 }
 
@@ -1446,12 +1483,19 @@ function getClientIp(request) {
 }
 
 function toStoragePath(relativePath) {
-  const absolutePath = path.resolve(storageDir, relativePath);
+  const absolutePath = path.resolve(storageDir(), relativePath);
 
-  if (absolutePath !== storageDir && !absolutePath.startsWith(`${storageDir}${path.sep}`)) {
+  if (absolutePath !== storageDir() && !absolutePath.startsWith(`${storageDir()}${path.sep}`)) {
     throw new Error("Ruta fuera del almacenamiento");
   }
 
+  let checked = storageDir();
+  for (const part of path.relative(storageDir(), absolutePath).split(path.sep).filter(Boolean)) {
+    checked = path.join(checked, part);
+    try {
+      if (lstatSync(checked).isSymbolicLink()) throw Object.assign(new Error("invalid_path"), { statusCode: 400 });
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
   return absolutePath;
 }
 

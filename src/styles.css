@@ -655,3 +655,8 @@ body.login-page { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
+
+.demo-entry{width:100%;justify-content:center;margin-top:8px;}
+.demo-help{font-size:13px;line-height:1.5;color:var(--muted);}
+.demo-banner{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:14px 24px;background:var(--surface);border-bottom:1px solid var(--line);font-size:13px;}
+.demo-banner strong{color:var(--text);}

@@ -141,7 +141,7 @@ test("room exchange, authentication, uploads, saving, restart and automatic clea
     const imported = await create("De mi nube");
     const route = `/api/rooms/${imported.token}/import`;
     const paths = ["Fotos/foto ñ.png", "Fotos/Vacaciones/foto ñ.png"];
-    for (const [cookie, expected] of [[undefined, 401], [viewer, 403], [other, 403]]) {
+    for (const [cookie, expected] of [[undefined, 401], [viewer, 403], [other, 404]]) {
       assert.equal((await request(route, { method: "POST", cookie, json: { paths } })).status, expected);
     }
     assert.equal((await request(route, { method: "POST", cookie: owner, json: { paths }, headers: { Origin: "https://unrelated.invalid" } })).status, 403);
@@ -212,7 +212,7 @@ test("room exchange, authentication, uploads, saving, restart and automatic clea
 
   await t.test("only the owner can save to the cloud, with unique names and checksums", async () => {
     const route = `/api/rooms/${room.token}/save`;
-    for (const [cookie, expected] of [[undefined, 401], [viewer, 403], [other, 403]]) {
+    for (const [cookie, expected] of [[undefined, 401], [viewer, 403], [other, 404]]) {
       assert.equal((await request(route, { method: "POST", cookie, json: { files: [textName] } })).status, expected);
     }
     const response = await request(route, { method: "POST", cookie: owner, json: { files: [textName, imageName] } });
