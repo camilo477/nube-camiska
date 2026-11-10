@@ -53,7 +53,8 @@ un espacio independiente, con permisos de solo lectura.
    nombre de tu cuenta personal actual. Si no se define, se usa `CLOUD_USER` si
    corresponde a una cuenta configurada; en su defecto, la primera cuenta `admin`
    será propietaria de los archivos que ya estaban en la raíz.
-3. El servidor guarda esa decisión en `.accounts-layout.json` dentro del volumen.
+3. El servidor guarda esa decisión en `.accounts-layout.json` dentro del volumen
+   de estado (el volumen personal por defecto).
    **No mueve ni borra tus archivos actuales.** La cuenta original sigue usando
    la raíz; las demás usan directorios privados dentro de `.accounts/`, identificados
    mediante un hash del nombre de usuario.
@@ -83,13 +84,55 @@ con documentos, notas, un proyecto e imagen ficticios. Puede navegar, buscar,
 previsualizar y descargar. No puede subir, editar, borrar, compartir, crear salas
 ni acceder a archivos de otras cuentas. Los ejemplos se conservan al reiniciar;
 no se sobrescriben los que ya existan. Las sesiones de prueba duran como máximo
-2 horas y se limita la creación repetida de sesiones desde una misma IP.
+2 horas y se limita la creación repetida de sesiones desde una misma IP. Se
+conservan como máximo 100 sesiones de demostración a la vez.
 
 Desactivar `CLOUD_DEMO_ENABLED` retira el botón y revoca el acceso de sus sesiones.
 Los archivos personales nunca se copian a la demo. La demo utiliza el mismo servidor;
-requiere que el servidor y su almacenamiento estén disponibles. Para un dominio
-de demostración con disponibilidad independiente puedes desplegar otro contenedor
-con un volumen separado y los mismos ejemplos.
+este debe permanecer encendido. Su almacenamiento y sus sesiones pueden vivir en
+la tarjeta de arranque, de forma independiente del disco de archivos personales.
+
+### Raspberry: demo y sesiones pequeñas en la tarjeta
+
+`scripts/deploy-raspberry.sh` construye y actualiza el contenedor con tres volúmenes:
+
+- `/data`: los archivos personales de `/mnt/disco/nube`.
+- `/state`: sesiones, eventos y distribución de cuentas, en
+  `~/.local/share/nube-camiska/state`.
+- `/demo`: los cuatro archivos ficticios, en
+  `~/.local/share/nube-camiska/demo`.
+
+La demo es de solo lectura: no admite subidas ni genera copias de archivos
+personales. Los ejemplos ocupan alrededor de 1 KB de contenido; las sesiones
+temporales y los 200 últimos eventos son metadatos pequeños. El límite de
+almacenamiento mostrado en la demo es ilustrativo; no reserva 25 MB de la tarjeta.
+
+En el primer despliegue se copian únicamente la distribución de cuentas y, si se
+pueden leer, las sesiones existentes. No se mueven fotos, videos ni documentos.
+El archivo `.accounts-layout.json` original permanece en el disco como marcador:
+si no se encuentra o no coincide, la API personal devuelve `503 storage_unavailable`.
+Así no se crea una nube personal vacía sobre la tarjeta cuando falta el disco.
+El login, la salida y la demo siguen funcionando sin el disco externo.
+
+Para actualizar desde la Raspberry:
+
+```bash
+cd ~/nube/nube-camiska
+git pull --ff-only origin main
+bash scripts/deploy-raspberry.sh
+```
+
+El script usa `~/.nube-camiska.env`, mantiene una copia del contenedor anterior y
+lo restaura si el nuevo no responde. Si no hay un disco legible, monta un directorio
+vacío como almacenamiento no disponible; la protección del marcador impide usarlo
+para archivos personales. Después de reconectar y montar el disco, vuelve a ejecutar
+el despliegue para que Docker tome el montaje correcto. Puedes sobrescribir las rutas
+del host con `NUBE_ENV_FILE`, `NUBE_MOUNT_POINT`, `NUBE_PERSONAL_DIR` y `NUBE_BOOT_DIR`.
+
+En otros despliegues puedes definir `CLOUD_STATE_DIR` y `CLOUD_DEMO_STORAGE_DIR` con
+directorios persistentes separados. Cuando el estado está separado, prepara primero
+el marcador de propiedad en el disco personal y conserva una copia en el estado;
+el script anterior hace esta migración y evita depender del disco al arrancar la demo.
 
 Para añadir cuentas normales configura `CLOUD_USERS_JSON` (consulta `.env.example`).
 No hay registro público de usuarios. `CLOUD_LEGACY_USER` solo fija el propietario
@@ -177,6 +220,8 @@ http://localhost:3002
 - `CLOUD_VIEWER_USER`: usuario opcional de solo lectura.
 - `CLOUD_VIEWER_PASSWORD`: clave opcional de solo lectura.
 - `CLOUD_DEMO_ENABLED`: `true` habilita la demo de solo lectura; desactivada por defecto.
+- `CLOUD_STATE_DIR`: carpeta persistente de sesiones y distribución de cuentas; por defecto `CLOUD_STORAGE_DIR`.
+- `CLOUD_DEMO_STORAGE_DIR`: carpeta independiente para los ejemplos. Si el estado está separado, por defecto usa `demo` dentro de `CLOUD_STATE_DIR`.
 - `CLOUD_LEGACY_USER`: propietario inicial de los archivos que ya existen en la raíz.
 - `CLOUD_USERS_JSON`: alternativa avanzada para definir varios usuarios con espacios independientes.
   Ejemplo: `[{"username":"camilo","password":"...","role":"admin"},{"username":"familia","password":"...","role":"viewer"}]`.

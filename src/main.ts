@@ -656,6 +656,10 @@ async function loadSection() {
     const url = section === "files" ? `/api/files?path=${encodeURIComponent(currentPath)}` : section === "trash" ? "/api/trash" : `/api/library?view=${section}`;
     const response = await fetch(url);
     if (response.status === 401) { authenticated = false; if (roomAdminPoll) { window.clearInterval(roomAdminPoll); roomAdminPoll = 0; } return renderLogin(); }
+    if (response.status === 503) {
+      items = []; dashboard = null; selected.clear(); previewPath = null;
+      throw new Error("El disco de tus archivos no está disponible. La demo sigue funcionando de forma independiente.");
+    }
     if (!response.ok) throw new Error("No pudimos cargar esta vista.");
     const data = await response.json() as { path?: string; parent?: string | null; items: CloudItem[] };
     items = section === "trash" ? data.items.map(item => ({ ...item, name: item.name.replace(/^\d+-/, ""), path: item.name, mediaType: item.mediaType ?? "other", url: null, checksum: null })) : data.items;

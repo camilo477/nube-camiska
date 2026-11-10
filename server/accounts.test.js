@@ -13,9 +13,9 @@ const users = [
   { username: "reader", password: "test-password", role: "viewer" },
 ];
 
-async function start(storage, configuredUsers = users, demo = true) {
+async function start(storage, configuredUsers = users, demo = true, { state = "", examples = "" } = {}) {
   const child = spawn(process.execPath, ["server/index.js"], {
-    env: { ...process.env, NODE_ENV: "production", PORT: "0", CLOUD_STORAGE_DIR: storage, CLOUD_USERS_JSON: JSON.stringify(configuredUsers), CLOUD_DEMO_ENABLED: String(demo), CLOUD_LEGACY_USER: "", CLOUD_MAX_FILE_BYTES: "4096", CLOUD_SECURITY_TOKEN: "test-internal-token" },
+    env: { ...process.env, NODE_ENV: "production", PORT: "0", CLOUD_STORAGE_DIR: storage, CLOUD_STATE_DIR: state, CLOUD_DEMO_STORAGE_DIR: examples, CLOUD_USERS_JSON: JSON.stringify(configuredUsers), CLOUD_DEMO_ENABLED: String(demo), CLOUD_LEGACY_USER: "", CLOUD_MAX_FILE_BYTES: "4096", CLOUD_SECURITY_TOKEN: "test-internal-token" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let errors = "";
@@ -155,5 +155,75 @@ test("accounts isolate files, mutations, metadata, shares, rooms and the portfol
     assert.equal((await request("/api/me", { cookie: demo })).status, 401);
     assert.equal((await request("/api/demo", { method: "POST" })).status, 404);
     assert.equal((await (await request("/api/config")).json()).demoEnabled, false);
+  });
+});
+
+test("demo and sessions survive an absent or disconnected personal disk without creating a replacement cloud", { timeout: 30000 }, async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "nube-independent-demo-"));
+  const storage = path.join(directory, "personal-disk");
+  const state = path.join(directory, "boot-card", "state");
+  const examples = path.join(directory, "boot-card", "demo");
+  let server = await start(storage, users, true, { state, examples });
+  t.after(async () => { await server.stop(); await fs.rm(directory, { recursive: true, force: true }); });
+  const request = (url, { cookie, json, ...options } = {}) => fetch(`${server.base}${url}`, {
+    ...options, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(json !== undefined ? { "Content-Type": "application/json" } : {}) },
+    ...(json !== undefined ? { body: JSON.stringify(json) } : {}),
+  });
+  const login = async () => {
+    const response = await request("/api/login", { method: "POST", json: { username: "owner", password: "test-password" } });
+    assert.equal(response.status, 200);
+    return response.headers.get("set-cookie").split(";")[0];
+  };
+  const owner = await login();
+  const response = await request("/api/demo", { method: "POST" });
+  assert.equal(response.status, 200);
+  const demo = response.headers.get("set-cookie").split(";")[0];
+
+  await t.test("a missing disk does not prevent demo startup or account sessions", async () => {
+    assert.equal((await request("/api/me", { cookie: owner })).status, 200);
+    assert.equal((await request("/api/files", { cookie: owner })).status, 503);
+    assert.equal((await request("/api/notes", { method: "POST", cookie: owner, json: { title: "Must not save", text: "private" } })).status, 503);
+    assert.equal((await (await request("/api/files", { cookie: demo })).json()).items.length, 4);
+    assert.match(await (await request("/files/Documentos/Lee%20primero.txt", { cookie: demo })).text(), /ficticios/);
+    assert.equal((await request("/api/notes", { method: "POST", cookie: demo, json: { title: "No write", text: "data" } })).status, 403);
+    await assert.rejects(fs.access(storage), { code: "ENOENT" });
+  });
+
+  await t.test("the personal disk resumes only with its original ownership marker", async () => {
+    await fs.mkdir(storage);
+    await fs.writeFile(path.join(storage, ".accounts-layout.json"), JSON.stringify({ version: 1, legacyOwner: "wrong-owner" }));
+    assert.equal((await request("/api/files", { cookie: owner })).status, 503);
+    await fs.writeFile(path.join(storage, ".accounts-layout.json"), JSON.stringify({ version: 1, legacyOwner: "owner" }));
+    await fs.writeFile(path.join(storage, "personal.txt"), "PRIVATE CONTENT");
+    assert.equal(await (await request("/files/personal.txt", { cookie: owner })).text(), "PRIVATE CONTENT");
+    assert.equal((await request("/files/personal.txt", { cookie: demo })).status, 404);
+    await fs.rename(storage, path.join(directory, "disconnected-disk"));
+    assert.equal((await request("/api/files", { cookie: owner })).status, 503);
+    assert.equal((await request("/api/files", { cookie: demo })).status, 200);
+    await assert.rejects(fs.access(storage), { code: "ENOENT" });
+  });
+
+  await t.test("demo sessions and contents persist across restart with the disk absent", async () => {
+    await server.stop();
+    server = await start(storage, users, true, { state, examples });
+    assert.equal((await request("/api/me", { cookie: demo })).status, 200);
+    assert.equal((await request("/api/dashboard", { cookie: demo })).status, 200);
+    assert.equal((await request("/api/files", { cookie: owner })).status, 503);
+    assert.equal((await request("/api/logout", { method: "POST", cookie: owner })).status, 200);
+    assert.equal((await request("/api/me", { cookie: owner })).status, 401);
+    await assert.rejects(fs.access(storage), { code: "ENOENT" });
+  });
+
+  await t.test("public demo sessions have a fixed storage bound and leave private sessions intact", async () => {
+    const privateCookie = await login();
+    const file = path.join(state, ".security.json");
+    const security = JSON.parse(await fs.readFile(file, "utf8"));
+    security.sessions.push(...Array.from({ length: 150 }, (_, index) => ({ id: `old-demo-${index}`, username: "portfolio-demo", role: "viewer", tokenHash: "unusable-test-token", ip: "old-demo-ip", createdAt: Date.now() - 1000 - index, expiresAt: Date.now() + 3600000, lastSeen: Date.now() })));
+    await fs.writeFile(file, JSON.stringify(security));
+    assert.equal((await request("/api/demo", { method: "POST" })).status, 200);
+    const updated = JSON.parse(await fs.readFile(file, "utf8"));
+    assert.equal(updated.sessions.filter(session => session.username === "portfolio-demo").length, 100);
+    assert.equal((await request("/api/me", { cookie: privateCookie })).status, 200);
+    assert.ok((await fs.stat(file)).size < 100 * 1024);
   });
 });

@@ -15,6 +15,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "dist");
 const baseStorageDir = path.resolve(process.env.CLOUD_STORAGE_DIR ?? path.join(rootDir, "data"));
+const stateStorageDir = path.resolve(process.env.CLOUD_STATE_DIR || baseStorageDir);
+const demoStorageDir = process.env.CLOUD_DEMO_STORAGE_DIR ? path.resolve(process.env.CLOUD_DEMO_STORAGE_DIR) : undefined;
 const port = Number(process.env.PORT ?? 8080);
 const maxFileBytes = Number(process.env.CLOUD_MAX_FILE_BYTES ?? process.env.CLOUD_MAX_UPLOAD_BYTES ?? 1024 * 1024 * 1024 * 8);
 const failWindowMs = Number(process.env.CLOUD_AUTH_WINDOW_MS ?? 15 * 60 * 1000);
@@ -74,9 +76,9 @@ if (process.env.NODE_ENV === "production" && users.length === 0) {
   throw new Error("Define CLOUD_USER/CLOUD_PASSWORD o CLOUD_USERS_JSON antes de correr en producción.");
 }
 
-await fs.mkdir(baseStorageDir, { recursive: true });
+await fs.mkdir(stateStorageDir, { recursive: true });
 if (runSecurityCommand()) process.exit();
-const accountStorage = await createAccountStorage(baseStorageDir, users.length ? users : [{ username: "dev", role: "admin" }], demoEnabled);
+const accountStorage = await createAccountStorage(baseStorageDir, users.length ? users : [{ username: "dev", role: "admin" }], demoEnabled, { stateDir: stateStorageDir, demoDir: demoStorageDir });
 const storageDir = () => accountStorage.root();
 
 const server = http.createServer((request, response) => accountStorage.run(undefined, async () => {
@@ -149,7 +151,6 @@ const server = http.createServer((request, response) => accountStorage.run(undef
       return;
     }
 
-    accountStorage.enter(auth.user);
     response.setHeader("Cache-Control", "private, no-store");
 
     if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && !sameOrigin(request)) {
@@ -166,6 +167,9 @@ const server = http.createServer((request, response) => accountStorage.run(undef
       sendJson(response, 200, { user: auth.user.username, role: auth.user.role, demo: Boolean(auth.user.demo) });
       return;
     }
+
+    await accountStorage.prepare(auth.user);
+    accountStorage.enter(auth.user);
 
     if (requestUrl.pathname === "/api/health" && request.method === "GET") {
       await sendHealth(response);
@@ -307,7 +311,11 @@ server.listen(port, "0.0.0.0", () => {
 
 // Cleanup runs even when every browser has left the room.
 setInterval(() => {
-  for (const scope of accountStorage.scopes()) void accountStorage.run(scope, () => removeExpiredRooms().catch(console.error));
+  for (const scope of accountStorage.scopes()) {
+    void accountStorage.prepare(scope.user)
+      .then(active => accountStorage.run(active, () => removeExpiredRooms()))
+      .catch(error => { if (error.statusCode !== 503) console.error(error); });
+  }
 }, 1000).unref();
 
 function buildUsers() {
@@ -411,6 +419,11 @@ function createSession(request, response, user, state) {
   delete state.attempts[ip];
   const token = randomBytes(32).toString("base64url");
   const device = getDeviceName(request.headers["user-agent"]);
+  if (user.demo) {
+    const activeDemo = state.sessions.filter(session => session.username === demoAccount.username).sort((a, b) => b.createdAt - a.createdAt);
+    const retained = new Set(activeDemo.slice(0, 99).map(session => session.id));
+    state.sessions = state.sessions.filter(session => session.username !== demoAccount.username || retained.has(session.id));
+  }
   state.sessions.push({
     id: randomUUID(),
     tokenHash: hashValue(token),
@@ -488,7 +501,7 @@ function registerFailedAttempt(state, ip, request) {
 
 function readSecurityState() {
   try {
-    return JSON.parse(readFileSync(path.join(baseStorageDir, securityFileName), "utf8"));
+    return JSON.parse(readFileSync(path.join(stateStorageDir, securityFileName), "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
     return { sessions: [], attempts: {}, events: [] };
@@ -496,7 +509,7 @@ function readSecurityState() {
 }
 
 function writeSecurityState(state) {
-  const target = path.join(baseStorageDir, securityFileName);
+  const target = path.join(stateStorageDir, securityFileName);
   const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, target);
